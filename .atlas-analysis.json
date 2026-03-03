@@ -1,0 +1,120 @@
+{
+  "projectType": "data-platform",
+  "projectName": "Datacave",
+  "projectDescription": "A high-performance, distributed SQL database built in Rust with LSM-based storage and PostgreSQL wire protocol compatibility.",
+  "theme": "aspen",
+  "primaryColor": "#1e7fbd",
+  "lightColor": "#64b5f6",
+  "darkColor": "#0d47a1",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "installation"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "architecture/overview",
+              "architecture/storage-engine",
+              "architecture/query-execution",
+              "architecture/wire-protocol"
+            ]
+          },
+          {
+            "group": "Guides",
+            "pages": [
+              "guides/connecting-clients",
+              "guides/data-modeling",
+              "guides/transactions",
+              "guides/security"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "SQL Reference",
+        "groups": [
+          {
+            "group": "SQL",
+            "pages": [
+              "sql/overview",
+              "sql/ddl",
+              "sql/dml",
+              "sql/queries",
+              "sql/joins",
+              "sql/aggregations",
+              "sql/compatibility"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Operations",
+        "groups": [
+          {
+            "group": "Deployment",
+            "pages": [
+              "operations/deployment",
+              "operations/configuration",
+              "operations/clustering"
+            ]
+          },
+          {
+            "group": "Management",
+            "pages": [
+              "operations/monitoring",
+              "operations/performance",
+              "operations/backup-recovery",
+              "operations/troubleshooting"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Crates",
+            "pages": [
+              "api/datacave-core",
+              "api/datacave-lsm",
+              "api/datacave-sql",
+              "api/datacave-protocol",
+              "api/datacave-server"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "LSM-based storage engine optimized for write-heavy workloads",
+    "PostgreSQL wire protocol compatibility for easy client integration",
+    "Distributed architecture with sharding and replication",
+    "SQL support with joins, aggregations, and transactions",
+    "Built-in authentication, TLS encryption, and audit logging",
+    "Comprehensive observability with metrics and health endpoints",
+    "Modular Rust architecture with clean crate boundaries",
+    "High-performance concurrent operations"
+  ],
+  "publicApiSurface": [
+    "Server: serve, check-config, gen-password-hash",
+    "DDL: CREATE TABLE, DROP TABLE",
+    "DML: INSERT, SELECT, UPDATE, DELETE",
+    "Joins: INNER JOIN, LEFT JOIN",
+    "Clauses: WHERE, ORDER BY, LIMIT, OFFSET, GROUP BY, HAVING",
+    "Aggregations: COUNT, SUM, AVG, MIN, MAX",
+    "Transactions: BEGIN, COMMIT, ROLLBACK",
+    "Protocol: Simple Query (Q), Extended Query (Parse/Bind/Execute/Sync)",
+    "Endpoints: /metrics, /health, /ready",
+    "Configuration: server, storage, sharding, cluster, metrics, security"
+  ]
+}

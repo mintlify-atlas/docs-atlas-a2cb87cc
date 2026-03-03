@@ -1,0 +1,610 @@
+---
+title: Performance Tuning
+description: Performance optimization, compaction settings, and benchmark results for Datacave
+---
+
+## Overview
+
+Datacave is optimized for write-heavy workloads using an LSM-based storage engine. This guide covers:
+
+- Storage configuration tuning
+- Compaction optimization
+- Query performance
+- Benchmark results
+- Hardware recommendations
+
+## Benchmark Results
+
+### Test Environment
+
+- **Machine**: Local development environment
+- **Build**: `cargo bench` (Criterion, release profile)
+- **Storage**: Temporary local filesystem
+- **Note**: Results reflect micro-benchmarks, not full production workloads
+
+### LSM Storage Benchmarks
+
+<CodeGroup>
+```bash Command
+cargo bench -p datacave-lsm
+```
+
+```
+Results
+lsm_put_get: 416-455 µs per iteration
+```
+</CodeGroup>
+
+The `lsm_put_get` benchmark measures:
+- Write a key-value pair to the LSM engine
+- Immediately read it back
+- Includes memtable write and lookup (not SSTable I/O)
+
+### SQL Benchmarks
+
+<CodeGroup>
+```bash Command
+cargo bench -p datacave-sql
+```
+
+```
+Results
+sql_parse: 3.30-3.72 µs per iteration
+sql_end_to_end: 419-447 µs per iteration
+```
+</CodeGroup>
+
+**Breakdown:**
+- `sql_parse`: Parse SQL query string to AST (3.3-3.7 µs)
+- `sql_end_to_end`: Parse, plan, execute, and return results (419-447 µs)
+
+### Comparison Notes
+
+<Warning>
+  These benchmarks are **not directly comparable** to other databases without identical workloads, hardware, and datasets. Use as relative indicators only.
+</Warning>
+
+For fair comparisons, run standardized benchmarks:
+
+<Tabs>
+  <Tab title="PostgreSQL">
+    ```bash
+    # Run pgbench against PostgreSQL
+    pgbench -i -s 10 postgres
+    pgbench -c 10 -j 1 -t 1000 postgres
+    ```
+    
+    **Published example**: TPS = 896.97 (10 clients, scaling factor 10)
+    
+    Source: https://www.postgresql.org/docs/current/pgbench.html
+  </Tab>
+  
+  <Tab title="SQLite">
+    ```bash
+    # SQLite speedtest
+    sqlite3 test.db < speedtest.sql
+    ```
+    
+    **Published example**: 3.48.0 used ~0.965M CPU cycles (cachegrind)
+    
+    Source: https://sqlite.org/cpu.html
+  </Tab>
+  
+  <Tab title="RocksDB">
+    ```bash
+    # RocksDB db_bench
+    db_bench --benchmarks=fillrandom,readrandom --num=10000000
+    ```
+    
+    **Published example**: Bulk load ~1,003,732 ops/sec (version 7.2.2)
+    
+    Source: https://github.com/facebook/rocksdb/wiki/performance-benchmarks
+  </Tab>
+</Tabs>
+
+## Storage Configuration Tuning
+
+### Memtable Size
+
+The memtable holds recent writes in memory before flushing to disk.
+
+```toml
+[storage]
+memtable_max_bytes = 67108864  # 64 MB
+```
+
+<AccordionGroup>
+  <Accordion title="Increase for write-heavy workloads">
+    **Scenario**: High write throughput (>10K writes/sec)
+    
+    **Recommendation**: 128-256 MB
+    
+    ```toml
+    memtable_max_bytes = 134217728  # 128 MB
+    ```
+    
+    **Benefits**:
+    - Fewer memtable flushes
+    - Better write batching
+    - Reduced SSTable count
+    
+    **Tradeoffs**:
+    - Higher memory usage
+    - Longer flush times
+    - Larger WAL files
+  </Accordion>
+  
+  <Accordion title="Decrease for memory-constrained systems">
+    **Scenario**: Limited RAM (< 4 GB)
+    
+    **Recommendation**: 16-32 MB
+    
+    ```toml
+    memtable_max_bytes = 33554432  # 32 MB
+    ```
+    
+    **Benefits**:
+    - Lower memory footprint
+    - Faster recovery (smaller WAL)
+    
+    **Tradeoffs**:
+    - More frequent flushes
+    - Higher write amplification
+    - More SSTables
+  </Accordion>
+  
+  <Accordion title="Calculate based on shard count">
+    **Formula**: `memtable_max_bytes × shard_count = total_memory`
+    
+    **Example**: 8 shards, 512 MB total memtable budget
+    
+    ```toml
+    memtable_max_bytes = 67108864  # 64 MB × 8 = 512 MB
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### SSTable Size
+
+Target size for SSTable files created during flush and compaction.
+
+```toml
+[storage]
+sstable_target_bytes = 134217728  # 128 MB
+```
+
+<AccordionGroup>
+  <Accordion title="Increase for large datasets">
+    **Scenario**: Multi-TB dataset, low write rate
+    
+    **Recommendation**: 256-512 MB
+    
+    ```toml
+    sstable_target_bytes = 268435456  # 256 MB
+    ```
+    
+    **Benefits**:
+    - Fewer total files
+    - Lower metadata overhead
+    - Better sequential scan performance
+    
+    **Tradeoffs**:
+    - Slower compactions
+    - More temporary disk space during compaction
+  </Accordion>
+  
+  <Accordion title="Decrease for fast compaction">
+    **Scenario**: Frequent updates, small dataset
+    
+    **Recommendation**: 32-64 MB
+    
+    ```toml
+    sstable_target_bytes = 67108864  # 64 MB
+    ```
+    
+    **Benefits**:
+    - Faster compaction cycles
+    - Lower compaction I/O impact
+    - Quicker obsolete data removal
+    
+    **Tradeoffs**:
+    - More files
+    - Higher read amplification
+  </Accordion>
+</AccordionGroup>
+
+### Compaction Interval
+
+How often automatic compaction runs.
+
+```toml
+[storage]
+compaction_interval_secs = 300  # 5 minutes
+```
+
+<AccordionGroup>
+  <Accordion title="Decrease for write-heavy workloads">
+    **Scenario**: Continuous high write rate
+    
+    **Recommendation**: 60-120 seconds
+    
+    ```toml
+    compaction_interval_secs = 60
+    ```
+    
+    **Benefits**:
+    - Prevents SSTable accumulation
+    - Maintains read performance
+    - Better disk space reclamation
+  </Accordion>
+  
+  <Accordion title="Increase to reduce background I/O">
+    **Scenario**: Read-heavy workload, limited I/O budget
+    
+    **Recommendation**: 600-1800 seconds (10-30 minutes)
+    
+    ```toml
+    compaction_interval_secs = 600
+    ```
+    
+    **Benefits**:
+    - Less background I/O
+    - More resources for queries
+    
+    **Tradeoffs**:
+    - Slower read performance over time
+    - More disk space usage
+  </Accordion>
+</AccordionGroup>
+
+## Query Performance Optimization
+
+### Index Usage (When Available)
+
+<Note>
+  Indexes are not yet implemented in Datacave. This section documents planned functionality.
+</Note>
+
+Once indexes are supported:
+
+```sql
+-- Create index for faster lookups
+CREATE INDEX idx_users_email ON users(email);
+
+-- Query uses index
+SELECT * FROM users WHERE email = 'user@example.com';
+```
+
+### Primary Key Design
+
+Choose primary keys that distribute data evenly across shards:
+
+**Good**:
+```sql
+-- UUIDs distribute evenly
+CREATE TABLE events (
+  id TEXT PRIMARY KEY,  -- UUID
+  timestamp BIGINT,
+  data TEXT
+);
+```
+
+**Avoid**:
+```sql
+-- Sequential IDs create hot shards
+CREATE TABLE events (
+  id BIGINT PRIMARY KEY,  -- Auto-increment
+  timestamp BIGINT,
+  data TEXT
+);
+```
+
+### Query Patterns
+
+<Tabs>
+  <Tab title="Point Lookups">
+    **Best performance**: Queries by primary key
+    
+    ```sql
+    -- Fast: Direct shard lookup
+    SELECT * FROM users WHERE id = 'user-123';
+    ```
+    
+    **Latency**: Sub-millisecond (memtable) to few milliseconds (SSTable)
+  </Tab>
+  
+  <Tab title="Range Scans">
+    **Moderate performance**: Scan multiple keys
+    
+    ```sql
+    -- Moderate: Scan within shard
+    SELECT * FROM events 
+    WHERE timestamp > 1234567890 
+      AND timestamp < 1234567999
+    LIMIT 100;
+    ```
+    
+    **Optimization**: Use `LIMIT` to reduce data scanned
+  </Tab>
+  
+  <Tab title="Full Table Scans">
+    **Slowest**: Scan all shards
+    
+    ```sql
+    -- Slow: Scans all data
+    SELECT * FROM users WHERE email LIKE '%@example.com';
+    ```
+    
+    **Optimization**: Add indexes (when available) or partition data
+  </Tab>
+  
+  <Tab title="Aggregations">
+    **Variable performance**: Depends on data volume
+    
+    ```sql
+    -- Requires scanning all matching rows
+    SELECT COUNT(*), AVG(price) 
+    FROM orders 
+    WHERE status = 'completed'
+    GROUP BY product_id;
+    ```
+    
+    **Optimization**: Materialize aggregates or use incremental aggregation
+  </Tab>
+</Tabs>
+
+### Batch Operations
+
+Batch inserts/updates for better throughput:
+
+```sql
+-- Good: Single transaction, multiple rows
+BEGIN;
+INSERT INTO users (id, name, email) VALUES 
+  ('1', 'Alice', 'alice@example.com'),
+  ('2', 'Bob', 'bob@example.com'),
+  ('3', 'Charlie', 'charlie@example.com');
+COMMIT;
+
+-- Avoid: Multiple transactions
+INSERT INTO users (id, name, email) VALUES ('1', 'Alice', 'alice@example.com');
+INSERT INTO users (id, name, email) VALUES ('2', 'Bob', 'bob@example.com');
+INSERT INTO users (id, name, email) VALUES ('3', 'Charlie', 'charlie@example.com');
+```
+
+## Hardware Recommendations
+
+### CPU
+
+<ResponseField name="Cores" type="integer">
+  - **Minimum**: 2 cores
+  - **Recommended**: 4-8 cores
+  - **High performance**: 16+ cores
+  
+  Datacave parallelizes compaction and query execution across cores.
+</ResponseField>
+
+### Memory
+
+<ResponseField name="RAM" type="string">
+  **Formula**: `(memtable_max_bytes × shard_count × 2) + connection_overhead + OS_cache`
+  
+  **Examples**:
+  - **Small**: 4 GB (2 shards, 64 MB memtable)
+  - **Medium**: 16 GB (8 shards, 128 MB memtable)
+  - **Large**: 64 GB (32 shards, 256 MB memtable)
+</ResponseField>
+
+### Storage
+
+<Tabs>
+  <Tab title="SSD (Recommended)">
+    **Type**: NVMe SSD or high-performance SATA SSD
+    
+    **IOPS**: 10K+ random read IOPS
+    
+    **Throughput**: 500+ MB/s sequential
+    
+    **Benefits**:
+    - Fast compaction
+    - Low read latency
+    - Better write endurance
+    
+    **Use case**: Production deployments, write-heavy workloads
+  </Tab>
+  
+  <Tab title="HDD (Budget)">
+    **Type**: 7200 RPM enterprise HDD
+    
+    **IOPS**: 100-200 random IOPS
+    
+    **Throughput**: 100-200 MB/s sequential
+    
+    **Limitations**:
+    - Slow compaction
+    - High read latency
+    - Write amplification bottleneck
+    
+    **Use case**: Development, cold storage, read-only replicas
+  </Tab>
+  
+  <Tab title="Cloud Storage">
+    **AWS**: gp3 (3000 IOPS baseline, scalable)
+    
+    **GCP**: pd-ssd (30 IOPS/GB)
+    
+    **Azure**: Premium SSD (120+ IOPS/GB)
+    
+    **Recommendations**:
+    - Provision IOPS based on write rate
+    - Monitor burst credit depletion
+    - Use local SSD for latency-sensitive workloads
+  </Tab>
+</Tabs>
+
+### Network
+
+<ResponseField name="Bandwidth" type="string">
+  **Minimum**: 1 Gbps
+  
+  **Recommended**: 10 Gbps for clustered deployments
+  
+  **Calculation**: `write_rate × (replication_factor - 1) × 1.5` (includes overhead)
+</ResponseField>
+
+<ResponseField name="Latency" type="string">
+  **Intra-cluster**: < 5ms for optimal replication
+  
+  **Client-to-server**: < 50ms for good user experience
+</ResponseField>
+
+## Monitoring Performance
+
+### Key Metrics to Watch
+
+<CardGroup cols={2}>
+  <Card title="Query Latency" icon="clock">
+    **Target**: P95 < 100ms, P99 < 500ms
+    
+    ```promql
+    histogram_quantile(0.95, 
+      rate(datacave_query_duration_seconds_bucket[5m])
+    )
+    ```
+  </Card>
+  
+  <Card title="SSTable Count" icon="file">
+    **Target**: < 30 per shard
+    
+    High count indicates compaction falling behind.
+    
+    ```promql
+    datacave_storage_sstable_count
+    ```
+  </Card>
+  
+  <Card title="Memtable Size" icon="memory">
+    **Target**: < 90% of max
+    
+    Approaching limit triggers flush.
+    
+    ```promql
+    datacave_storage_memtable_bytes / 67108864 * 100
+    ```
+  </Card>
+  
+  <Card title="Compaction Duration" icon="gears">
+    **Target**: P95 < 10s
+    
+    Long compactions impact write performance.
+    
+    ```promql
+    histogram_quantile(0.95,
+      rate(datacave_storage_compaction_duration_seconds_bucket[5m])
+    )
+    ```
+  </Card>
+</CardGroup>
+
+### Performance Degradation Indicators
+
+<Warning>
+  **Alert on these conditions**:
+  - SSTable count > 50 (compaction falling behind)
+  - P95 query latency > 1s (read amplification)
+  - Memtable flush frequency > 1/minute (undersized memtable)
+  - Compaction duration increasing over time (I/O bottleneck)
+</Warning>
+
+## Tuning Workflow
+
+<Steps>
+  <Step title="Establish Baseline">
+    Measure current performance:
+    ```bash
+    # Run representative workload
+    # Monitor metrics for 24 hours
+    # Document P50, P95, P99 latencies
+    ```
+  </Step>
+  
+  <Step title="Identify Bottleneck">
+    Common bottlenecks:
+    - High SSTable count → Increase compaction frequency
+    - High P95 latency → Reduce SSTable size
+    - Frequent memtable flushes → Increase memtable size
+    - High disk I/O wait → Upgrade to SSD
+  </Step>
+  
+  <Step title="Make One Change">
+    Adjust single parameter:
+    ```toml
+    # Example: Increase memtable size
+    memtable_max_bytes = 134217728
+    ```
+  </Step>
+  
+  <Step title="Measure Impact">
+    Run workload again:
+    ```bash
+    # Compare metrics to baseline
+    # Document improvements or regressions
+    ```
+  </Step>
+  
+  <Step title="Iterate">
+    Repeat until performance targets met.
+  </Step>
+</Steps>
+
+## Configuration Examples
+
+### Write-Heavy Workload
+
+```toml
+[storage]
+data_dir = "/var/lib/datacave/data"
+wal_enabled = true
+memtable_max_bytes = 134217728      # 128 MB (larger memtable)
+sstable_target_bytes = 268435456     # 256 MB (fewer files)
+compaction_interval_secs = 60        # Frequent compaction
+```
+
+### Read-Heavy Workload
+
+```toml
+[storage]
+data_dir = "/var/lib/datacave/data"
+wal_enabled = true
+memtable_max_bytes = 67108864        # 64 MB (standard)
+sstable_target_bytes = 134217728     # 128 MB (balance)
+compaction_interval_secs = 600       # Less frequent compaction
+```
+
+### Memory-Constrained
+
+```toml
+[storage]
+data_dir = "/var/lib/datacave/data"
+wal_enabled = true
+memtable_max_bytes = 33554432        # 32 MB (small memtable)
+sstable_target_bytes = 67108864      # 64 MB (small files)
+compaction_interval_secs = 300       # Standard interval
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Set up metrics to track performance
+  </Card>
+  <Card title="Configuration" icon="gear" href="/operations/configuration">
+    Configure performance settings
+  </Card>
+  <Card title="Clustering" icon="server" href="/operations/clustering">
+    Scale horizontally for higher throughput
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/operations/troubleshooting">
+    Debug performance issues
+  </Card>
+</CardGroup>

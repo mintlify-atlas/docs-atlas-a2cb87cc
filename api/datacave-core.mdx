@@ -1,0 +1,229 @@
+---
+title: datacave-core
+description: Core types, errors, catalog, and MVCC traits from the datacave-core crate
+---
+
+# datacave-core
+
+The `datacave-core` crate provides foundational types, error handling, catalog management, and MVCC (Multi-Version Concurrency Control) primitives used throughout Datacave.
+
+## Module Structure
+
+Located at `crates/datacave-core/src/`:
+
+- **lib.rs:1-10** - Public exports and module declarations
+- **error.rs** - Error types
+- **catalog.rs** - Schema catalog management
+- **types.rs** - Core data types
+- **mvcc.rs** - MVCC version management
+
+## Error Handling
+
+### DatacaveError
+
+Main error enum for all Datacave operations.
+
+**Source:** `crates/datacave-core/src/error.rs:3-15`
+
+```rust
+pub enum DatacaveError {
+    #[error("catalog error: {0}")]
+    Catalog(String),
+    #[error("storage error: {0}")]
+    Storage(String),
+    #[error("sql error: {0}")]
+    Sql(String),
+    #[error("protocol error: {0}")]
+    Protocol(String),
+    #[error("not supported: {0}")]
+    NotSupported(String),
+}
+```
+
+**Variants:**
+- `Catalog(String)` - Schema/catalog errors
+- `Storage(String)` - LSM storage errors
+- `Sql(String)` - SQL parsing/execution errors
+- `Protocol(String)` - PostgreSQL protocol errors
+- `NotSupported(String)` - Unsupported features
+
+## Core Types
+
+### DataValue
+
+Represents SQL values with variant types.
+
+**Source:** `crates/datacave-core/src/types.rs:3-11`
+
+```rust
+pub enum DataValue {
+    Null,
+    Int64(i64),
+    Float64(f64),
+    Bool(bool),
+    String(String),
+    Bytes(Vec<u8>),
+}
+```
+
+Implements `Serialize`, `Deserialize`, `PartialEq`, and `Clone`.
+
+### Column
+
+Describes a table column with name and type.
+
+**Source:** `crates/datacave-core/src/types.rs:13-17`
+
+```rust
+pub struct Column {
+    pub name: String,
+    pub data_type: String,
+}
+```
+
+### DataRow
+
+A row of data values.
+
+**Source:** `crates/datacave-core/src/types.rs:19-22`
+
+```rust
+pub struct DataRow {
+    pub values: Vec<DataValue>,
+}
+```
+
+### SqlResult
+
+Represents the result of a SQL operation.
+
+**Source:** `crates/datacave-core/src/types.rs:24-29`
+
+```rust
+pub struct SqlResult {
+    pub columns: Vec<Column>,
+    pub rows: Vec<DataRow>,
+    pub rows_affected: u64,
+}
+```
+
+## Catalog
+
+### TableSchema
+
+Defines a table's schema.
+
+**Source:** `crates/datacave-core/src/catalog.rs:6-11`
+
+```rust
+pub struct TableSchema {
+    pub name: String,
+    pub columns: Vec<Column>,
+    pub primary_key: Option<String>,
+}
+```
+
+### Catalog
+
+In-memory catalog for managing table schemas.
+
+**Source:** `crates/datacave-core/src/catalog.rs:13-43`
+
+```rust
+pub struct Catalog {
+    tables: HashMap<String, TableSchema>,
+}
+
+impl Catalog {
+    pub fn new() -> Self
+    
+    pub fn create_table(&mut self, schema: TableSchema) 
+        -> Result<(), DatacaveError>
+    
+    pub fn get_table(&self, name: &str) 
+        -> Option<&TableSchema>
+    
+    pub fn list_tables(&self) -> Vec<TableSchema>
+}
+```
+
+**Example:**
+
+```rust
+use datacave_core::{Catalog, TableSchema, Column};
+
+let mut catalog = Catalog::new();
+let schema = TableSchema {
+    name: "users".to_string(),
+    columns: vec![
+        Column { name: "id".to_string(), data_type: "BIGINT".to_string() },
+        Column { name: "name".to_string(), data_type: "TEXT".to_string() },
+    ],
+    primary_key: Some("id".to_string()),
+};
+catalog.create_table(schema)?;
+```
+
+## MVCC (Multi-Version Concurrency Control)
+
+### Version
+
+Monotonically increasing version number.
+
+**Source:** `crates/datacave-core/src/mvcc.rs:3`
+
+```rust
+pub type Version = u64;
+```
+
+### Snapshot
+
+Represents a consistent snapshot at a specific version.
+
+**Source:** `crates/datacave-core/src/mvcc.rs:5-8`
+
+```rust
+pub struct Snapshot {
+    pub version: Version,
+}
+```
+
+### MvccManager
+
+Manages version allocation and snapshot creation.
+
+**Source:** `crates/datacave-core/src/mvcc.rs:10-31`
+
+```rust
+pub struct MvccManager {
+    clock: AtomicU64,
+}
+
+impl MvccManager {
+    pub fn new() -> Self
+    
+    pub fn next_version(&self) -> Version
+    
+    pub fn snapshot(&self) -> Snapshot
+}
+```
+
+**Example:**
+
+```rust
+use datacave_core::mvcc::MvccManager;
+
+let mvcc = MvccManager::new();
+let v1 = mvcc.next_version();  // 1
+let v2 = mvcc.next_version();  // 2
+let snapshot = mvcc.snapshot(); // Captures current version
+```
+
+## Dependencies
+
+```toml
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+uuid = { version = "1", features = ["v4"] }
+```

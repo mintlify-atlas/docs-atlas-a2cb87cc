@@ -1,0 +1,264 @@
+---
+title: Compatibility Matrix
+description: Complete reference of supported and unsupported SQL features
+---
+
+This page documents all implemented SQL semantics and wire protocol behaviors with precise implementation notes.
+
+## SQL Semantics
+
+### DDL (Data Definition Language)
+
+| Feature | Status | Implementation Notes |
+|---------|--------|----------------------|
+| `CREATE TABLE` | ✅ Supported | Single table, basic column types (INT, BIGINT, TEXT, BOOLEAN, FLOAT). Primary key via `PRIMARY KEY (col)` constraint. |
+| `DROP TABLE` | ⚠️ Parser only | Parser accepts; planner/executor not wired. |
+| `CREATE INDEX` | ❌ Not supported | Planned for future release. |
+
+### DML (Data Manipulation Language)
+
+| Feature | Status | Implementation Notes |
+|---------|--------|----------------------|
+| `INSERT` | ✅ Supported | Values list; single-table only. Column list optional; values aligned by schema or position. |
+| `SELECT` | ✅ Supported | Single-table or INNER JOIN; projection, `*`, qualified column names. WHERE with column op literal (=, !=, &gt;, &gt;=, &lt;, &lt;=) and AND. ORDER BY, LIMIT, OFFSET supported. |
+| `UPDATE` | ✅ Supported | Single-table assignments. WHERE with column op literal and AND (updates only matching rows). |
+| `DELETE` | ✅ Supported | Single-table. WHERE with column op literal and AND (deletes only matching rows). |
+
+### Joins
+
+| Feature | Status | Implementation Notes |
+|---------|--------|----------------------|
+| `INNER JOIN` | ✅ Supported | Multi-table chains (3+). Equality `ON col1 = col2` or `USING (col)`. |
+| `LEFT JOIN` | ✅ Supported | Multi-table chains; equality ON or USING. |
+| `RIGHT JOIN` | ❌ Not supported | Planner returns `None` for non-inner/non-left. |
+| `FULL OUTER JOIN` | ❌ Not supported | Planner returns `None`. |
+| `CROSS JOIN` | ❌ Not supported | Planner returns `None`. |
+| Multi-table (3+) joins | ✅ Supported | INNER/LEFT chain; ON must reference tables in scope; USING supported. When selecting multiple columns with the same unqualified name from different tables (e.g. `customers.name`, `products.name`), use qualified names in SELECT; column order may vary. |
+
+### Aggregations
+
+| Feature | Status | Implementation Notes |
+|---------|--------|----------------------|
+| `COUNT(*)` | ✅ Supported | Returns `Int64`. |
+| `COUNT(col)` | ✅ Supported | Counts non-null values. |
+| `SUM(col)` | ✅ Supported | Returns `Float64`; numeric types only. |
+| `AVG(col)` | ✅ Supported | Returns `Float64`. |
+| `MIN(col)` | ✅ Supported | Returns `Float64` for numeric; nulls excluded. |
+| `MAX(col)` | ✅ Supported | Returns `Float64` for numeric; nulls excluded. |
+| `GROUP BY` | ✅ Supported | Single-table and join+aggregate. `GROUP BY ALL` not supported. |
+| `HAVING` | ✅ Supported | Only with GROUP BY. Column/alias, literal, or aggregate operands; `=`, `!=`, `&lt;`, `&lt;=`, `&gt;`, `&gt;=`. Aggregate expressions (e.g. `HAVING COUNT(*) &gt; 2`, `HAVING SUM(amount) &gt;= 100`) supported. AND for compound conditions. Single-table and join-grouped. |
+
+### Aggregates on Joined Rows
+
+| Feature | Status | Implementation Notes |
+|---------|--------|----------------------|
+| `SELECT COUNT(*) FROM t1 JOIN t2 ON ...` | ✅ Supported | Join executed first; aggregates computed on joined result. |
+| `SELECT SUM(col) FROM t1 JOIN t2 ON ...` | ✅ Supported | Same as above. |
+| `SELECT ... FROM t1 JOIN t2 ON ... ORDER BY col LIMIT n` | ✅ Supported | JOIN executed first; ORDER BY and LIMIT applied to joined result. |
+| `SELECT ... FROM t1 JOIN t2 ON ... WHERE col = lit` | ✅ Supported | WHERE applied to joined result (col op literal). |
+
+### Ordering and Pagination
+
+| Feature | Status | Implementation Notes |
+|---------|--------|----------------------|
+| `ORDER BY` | ✅ Supported | Column name, qualified column, or 1-based position. ASC/DESC. |
+| `LIMIT` | ✅ Supported | Numeric literal only. |
+| `OFFSET` | ✅ Supported | Numeric literal only. |
+
+### Transaction Control
+
+| Feature | Status | Implementation Notes |
+|---------|--------|----------------------|
+| `BEGIN` / `START TRANSACTION` | ⚠️ Accepted | Wire-accepted; returns `BEGIN` tag; ReadyForQuery `InTransaction`. Mutating statements buffered. |
+| `COMMIT` | ⚠️ Accepted | Executes buffered statements; ReadyForQuery `Idle`. |
+| `ROLLBACK` | ⚠️ Accepted | Discards buffer; ReadyForQuery `Idle`. |
+| Atomicity | ❌ Not implemented | No multi-statement atomicity or isolation. |
+
+<Warning>
+Transaction commands (`BEGIN`, `COMMIT`, `ROLLBACK`) are accepted and buffer statements, but **multi-statement atomicity and isolation are not guaranteed**.
+</Warning>
+
+### WHERE Clauses
+
+| Feature | Status | Implementation Notes |
+|---------|--------|----------------------|
+| `WHERE` on SELECT | ✅ Supported | Predicates: column op literal for =, !=, &gt;, &gt;=, &lt;, &lt;=. AND and OR combinations, parenthesized expressions. Column/literal order arbitrary. No functions, subqueries. |
+| `WHERE` on UPDATE | ✅ Supported | Same as SELECT. |
+| `WHERE` on DELETE | ✅ Supported | Same as SELECT. |
+| Subqueries | ❌ Not supported | Planned (IN, EXISTS, scalar). |
+
+### Other SQL Features
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Subqueries | ❌ Not supported | Planned (IN, EXISTS, scalar subqueries). |
+| Window functions | ❌ Not supported | Not planned. |
+| CTEs (WITH) | ❌ Not supported | Not planned. |
+| `ALTER TABLE` | ❌ Not supported | Not planned. |
+| Triggers | ❌ Not supported | Not planned. |
+| Stored procedures | ❌ Not supported | Not planned. |
+| User-defined functions | ❌ Not supported | Not planned. |
+
+## Data Types
+
+| Type | Status | Notes |
+|------|--------|-------|
+| `INT` | ✅ Supported | 32-bit integer |
+| `BIGINT` | ✅ Supported | 64-bit integer |
+| `FLOAT` | ✅ Supported | 64-bit floating point |
+| `TEXT` | ✅ Supported | Variable-length string |
+| `BOOLEAN` | ✅ Supported | True/false |
+| `VARCHAR` | ❌ Not supported | Use TEXT instead |
+| `DECIMAL` / `NUMERIC` | ❌ Not supported | Use FLOAT (precision loss possible) |
+| `DATE` | ❌ Not supported | Planned |
+| `TIMESTAMP` | ❌ Not supported | Planned |
+| `JSON` / `JSONB` | ❌ Not supported | Not planned |
+| `ARRAY` | ❌ Not supported | Not planned |
+
+## Wire Protocol
+
+### Message Types
+
+| Message | Direction | Status | Notes |
+|---------|-----------|--------|-------|
+| Startup | Client→Server | ✅ Supported | Cleartext params: user, database, tenant_id. |
+| AuthenticationCleartextPassword | Server→Client | ✅ Supported | When auth enabled. |
+| Password | Client→Server | ✅ Supported | Cleartext password. |
+| AuthenticationOk | Server→Client | ✅ Supported | On success. |
+| ParameterStatus | Server→Client | ✅ Supported | server_version. |
+| ReadyForQuery | Server→Client | ✅ Supported | `I` (Idle), `T` (Transaction), `E` (Error). |
+| Query (Q) | Client→Server | ✅ Supported | Simple query. |
+| Parse (P) | Client→Server | ✅ Supported | Statement name + query. |
+| Bind (B) | Client→Server | ✅ Supported | Portal + statement; param substitution for $1, $2, ?. |
+| Execute (E) | Client→Server | ✅ Supported | Portal + max_rows. |
+| Sync (S) | Client→Server | ✅ Supported | Flushes extended-query pipeline. |
+| Flush (H) | Client→Server | ✅ Supported | Request to flush output buffer; no-op (unbuffered). |
+| Describe (D) | Client→Server | ✅ Supported | Statement or Portal; returns NoData. |
+| ParseComplete (1) | Server→Client | ✅ Supported | After Parse. |
+| BindComplete (2) | Server→Client | ✅ Supported | After Bind. |
+| RowDescription (T) | Server→Client | ✅ Supported | Column names for SELECT. |
+| DataRow (D) | Server→Client | ✅ Supported | Text format values. |
+| CommandComplete (C) | Server→Client | ✅ Supported | Tag: OK, OK N, SELECT N, BEGIN, COMMIT, ROLLBACK. |
+| ErrorResponse (E) | Server→Client | ✅ Supported | On error. |
+| NoData (n) | Server→Client | ✅ Supported | For Describe on non-SELECT. |
+| Close (C) | Client→Server | ✅ Supported | Statement or Portal. |
+| CloseComplete (3) | Server→Client | ✅ Supported | After Close. |
+| Terminate (X) | Client→Server | ✅ Supported | Closes connection. |
+
+### Extended Query Flow
+
+The extended query protocol follows this sequence:
+
+| Step | Message | Response |
+|------|---------|----------|
+| 1 | Parse (P) | ParseComplete (1) |
+| 2 | Bind (B) | BindComplete (2) or ErrorResponse |
+| 3 | Describe (D) Portal | NoData (n) or RowDescription |
+| 4 | Execute (E) | RowDescription + DataRows + CommandComplete |
+| 5 | Sync (S) | ReadyForQuery |
+
+### Ready State Semantics
+
+| State | Code | When |
+|-------|------|------|
+| Idle | `I` | Not in transaction; after COMMIT/ROLLBACK. |
+| Transaction | `T` | After BEGIN; before COMMIT/ROLLBACK. |
+| Error | `E` | After failed command; requires ROLLBACK. |
+
+### Authentication
+
+| Method | Status | Notes |
+|--------|--------|-------|
+| Cleartext password | ✅ Supported | AuthenticationCleartextPassword flow |
+| MD5 | ❌ Not supported | Use cleartext (consider TLS) |
+| SCRAM-SHA-256 | ❌ Not supported | Not planned |
+| Certificate | ❌ Not supported | Not planned |
+
+<Warning>
+Datacave uses **cleartext password authentication**. Always use TLS in production to protect credentials in transit.
+</Warning>
+
+## PostgreSQL Compatibility Notes
+
+### What Works
+
+✅ **PostgreSQL clients**: `psql`, DBeaver, pgAdmin, language drivers
+
+✅ **Wire protocol**: Simple Query and Extended Query flows
+
+✅ **Connection lifecycle**: Startup, authentication, ReadyForQuery
+
+### What Doesn't Work
+
+❌ **PostgreSQL-specific syntax**: Many Postgres-specific features are not supported
+
+❌ **System catalogs**: `pg_catalog`, `information_schema` not available
+
+❌ **Advanced types**: Arrays, JSON, enums, ranges, etc.
+
+❌ **Extensions**: No support for Postgres extensions
+
+### Migration Considerations
+
+When migrating from PostgreSQL to Datacave:
+
+1. **Review schema**: Check that all column types are supported (INT, BIGINT, FLOAT, TEXT, BOOLEAN only)
+2. **Remove constraints**: Foreign keys, CHECK, UNIQUE not supported (except PRIMARY KEY)
+3. **Simplify queries**: No subqueries, window functions, CTEs
+4. **Join types**: Only INNER and LEFT; rewrite RIGHT/FULL/CROSS joins
+5. **Functions**: Remove function calls in WHERE/HAVING
+6. **Test transactions**: Verify behavior without full ACID guarantees
+
+## Test Coverage
+
+Datacave has comprehensive test coverage:
+
+- **Unit tests**: `datacave-sql/tests.rs`
+  - CREATE/INSERT/SELECT flow
+  - Aggregates (COUNT, SUM, AVG, MIN, MAX)
+  - INNER JOIN and LEFT JOIN
+  - Three-table joins (INNER and LEFT chains)
+  - GROUP BY with HAVING
+  - ORDER BY, LIMIT, OFFSET
+  - WHERE with AND/OR/parentheses
+  - UPDATE and DELETE with WHERE
+  - Transaction commands (BEGIN, COMMIT, ROLLBACK)
+
+- **Integration tests**: `datacave-server/server.rs`
+  - Simple query roundtrip
+  - Extended query Parse/Bind/Execute/Sync
+  - Multi-statement batches
+  - Transaction state management
+  - Joins + aggregates
+  - Join + ORDER BY + LIMIT
+  - Join + WHERE
+  - HAVING with aggregate expressions
+
+See [test source code](https://github.com/yourusername/datacave/blob/main/crates/datacave-sql/src/tests.rs) for detailed examples.
+
+## Roadmap
+
+Planned features (not yet implemented):
+
+- **Subqueries**: IN, EXISTS, scalar subqueries
+- **Indexes**: CREATE INDEX for query optimization
+- **Date/time types**: DATE, TIMESTAMP support
+- **Advanced WHERE**: LIKE, IS NULL, BETWEEN, IN with value lists
+- **Full ACID transactions**: Multi-statement atomicity and isolation
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="DDL Reference" icon="database" href="/sql/ddl">
+    CREATE TABLE syntax
+  </Card>
+  <Card title="DML Reference" icon="pen-to-square" href="/sql/dml">
+    INSERT, UPDATE, DELETE
+  </Card>
+  <Card title="Query Reference" icon="magnifying-glass" href="/sql/queries">
+    SELECT, WHERE, ORDER BY
+  </Card>
+  <Card title="Join Reference" icon="link" href="/sql/joins">
+    INNER JOIN, LEFT JOIN
+  </Card>
+</CardGroup>

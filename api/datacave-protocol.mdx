@@ -1,0 +1,361 @@
+---
+title: datacave-protocol
+description: PostgreSQL wire protocol implementation with frontend and backend message types
+---
+
+# datacave-protocol
+
+The `datacave-protocol` crate implements the PostgreSQL wire protocol for client-server communication.
+
+## Module Structure
+
+Located at `crates/datacave-protocol/src/`:
+
+- **lib.rs:1-14** - Public exports
+- **messages.rs** - Protocol message types
+- **frontend.rs** - Client→Server message parsing
+- **backend.rs** - Server→Client message writing
+
+## Message Types
+
+### FrontendMessage
+
+Messages sent from client to server.
+
+**Source:** `crates/datacave-protocol/src/messages.rs:3-43`
+
+```rust
+pub enum FrontendMessage {
+    Startup { params: HashMap<String, String> },
+    Query { sql: String },
+    Password { password: String },
+    Terminate,
+    Parse {
+        statement_name: String,
+        query: String,
+        param_oids: Vec<i32>,
+    },
+    Bind {
+        portal_name: String,
+        statement_name: String,
+        param_format_codes: Vec<i16>,
+        param_values: Vec<Option<Vec<u8>>>,
+        result_format_codes: Vec<i16>,
+    },
+    Describe {
+        target: DescribeTarget,
+        name: String,
+    },
+    Execute {
+        portal_name: String,
+        max_rows: i32,
+    },
+    Sync,
+    Flush,
+    Close {
+        target: CloseTarget,
+        name: String,
+    },
+    Unsupported { code: u8 },
+}
+```
+
+**Simple Query Protocol:**
+- `Startup` - Connection initialization with parameters
+- `Query` - Execute SQL statement
+- `Password` - Authentication response
+- `Terminate` - Close connection
+
+**Extended Query Protocol:**
+- `Parse` (P) - Parse SQL into prepared statement
+- `Bind` (B) - Bind parameters to prepared statement
+- `Describe` (D) - Describe statement or portal
+- `Execute` (E) - Execute portal
+- `Sync` (S) - Request ready-for-query
+- `Flush` (H) - Flush output buffer
+- `Close` (C) - Close statement or portal
+
+### BackendMessage
+
+Messages sent from server to client.
+
+**Source:** `crates/datacave-protocol/src/messages.rs:132-149`
+
+```rust
+pub enum BackendMessage {
+    AuthenticationOk,
+    AuthenticationCleartextPassword,
+    ParameterStatus { key: String, value: String },
+    BackendKeyData { pid: i32, secret: i32 },
+    ReadyForQuery { state: TransactionState },
+    ParseComplete,
+    BindComplete,
+    NoData,
+    ParameterDescription { param_oids: Vec<i32> },
+    RowDescription { fields: Vec<RowDescriptionField> },
+    DataRow { values: Vec<Option<Vec<u8>>> },
+    CommandComplete { tag: String },
+    ErrorResponse { message: String },
+    CloseComplete,
+}
+```
+
+### DescribeTarget
+
+**Source:** `crates/datacave-protocol/src/messages.rs:45-49`
+
+```rust
+pub enum DescribeTarget {
+    Statement,
+    Portal,
+}
+```
+
+### CloseTarget
+
+**Source:** `crates/datacave-protocol/src/messages.rs:51-55`
+
+```rust
+pub enum CloseTarget {
+    Statement,
+    Portal,
+}
+```
+
+### TransactionState
+
+Indicates transaction status in ReadyForQuery.
+
+**Source:** `crates/datacave-protocol/src/messages.rs:57-76`
+
+```rust
+pub enum TransactionState {
+    Idle,         // Not in transaction block
+    Transaction,  // In transaction (after BEGIN)
+    Error,        // Failed transaction, requires ROLLBACK
+}
+
+impl TransactionState {
+    pub fn wire_byte(self) -> u8 {
+        match self {
+            TransactionState::Idle => b'I',
+            TransactionState::Transaction => b'T',
+            TransactionState::Error => b'E',
+        }
+    }
+}
+```
+
+### RowDescriptionField
+
+Describes a result set column.
+
+**Source:** `crates/datacave-protocol/src/messages.rs:78-95`
+
+```rust
+pub struct RowDescriptionField {
+    pub name: String,
+    pub type_oid: i32,
+}
+
+impl RowDescriptionField {
+    pub fn with_type(name: impl Into<String>, data_type: &str) -> Self
+}
+```
+
+### data_type_to_oid
+
+Maps SQL type names to PostgreSQL type OIDs.
+
+**Source:** `crates/datacave-protocol/src/messages.rs:97-130`
+
+```rust
+pub fn data_type_to_oid(data_type: &str) -> i32
+```
+
+**Type Mappings:**
+- `INT`, `INTEGER`, `INT4` → 23
+- `BIGINT`, `INT8` → 20
+- `TEXT`, `VARCHAR`, `CHAR` → 25
+- `BOOLEAN`, `BOOL` → 16
+- `FLOAT`, `FLOAT4`, `REAL` → 700
+- `DOUBLE`, `FLOAT8`, `DOUBLE PRECISION` → 701
+- `BYTEA` → 17
+- Unknown → 25 (text)
+
+## Frontend (Client Messages)
+
+Parsing client messages from wire format.
+
+**Source:** `crates/datacave-protocol/src/frontend.rs`
+
+### read_startup
+
+Reads the initial startup message.
+
+**Source:** `crates/datacave-protocol/src/frontend.rs:128-135`
+
+```rust
+pub async fn read_startup<S: AsyncRead + Unpin>(stream: &mut S) 
+    -> Result<FrontendMessage>
+```
+
+### read_message
+
+Reads subsequent protocol messages.
+
+**Source:** `crates/datacave-protocol/src/frontend.rs:137-164`
+
+```rust
+pub async fn read_message<S: AsyncRead + Unpin>(stream: &mut S) 
+    -> Result<FrontendMessage>
+```
+
+**Message Type Codes:**
+- `Q` - Query
+- `p` - Password
+- `X` - Terminate
+- `P` - Parse
+- `B` - Bind
+- `D` - Describe
+- `E` - Execute
+- `S` - Sync
+- `H` - Flush
+- `C` - Close
+
+## Backend (Server Messages)
+
+Writing server messages to wire format.
+
+**Source:** `crates/datacave-protocol/src/backend.rs`
+
+### write_message
+
+Writes a backend message to the stream.
+
+**Source:** `crates/datacave-protocol/src/backend.rs:6-116`
+
+```rust
+pub async fn write_message<S: AsyncWrite + Unpin>(
+    stream: &mut S,
+    msg: BackendMessage
+) -> Result<()>
+```
+
+**Message Format:**
+
+All messages follow:
+```
+[type: u8][length: i32][payload: bytes]
+```
+
+Length includes itself (4 bytes) but not the type byte.
+
+**Message Type Codes:**
+- `R` - Authentication
+- `S` - ParameterStatus
+- `K` - BackendKeyData
+- `Z` - ReadyForQuery
+- `1` - ParseComplete
+- `2` - BindComplete
+- `n` - NoData
+- `t` - ParameterDescription
+- `T` - RowDescription
+- `D` - DataRow
+- `C` - CommandComplete
+- `E` - ErrorResponse
+- `3` - CloseComplete
+
+## Example Usage
+
+### Simple Query Flow
+
+```rust
+use datacave_protocol::{
+    frontend::read_message,
+    backend::write_message,
+    BackendMessage,
+    TransactionState,
+    RowDescriptionField,
+};
+
+// Read query
+let msg = read_message(&mut stream).await?;
+if let FrontendMessage::Query { sql } = msg {
+    // Send row description
+    write_message(&mut stream, BackendMessage::RowDescription {
+        fields: vec![
+            RowDescriptionField::with_type("id", "BIGINT"),
+            RowDescriptionField::with_type("name", "TEXT"),
+        ],
+    }).await?;
+    
+    // Send data rows
+    write_message(&mut stream, BackendMessage::DataRow {
+        values: vec![
+            Some(b"1".to_vec()),
+            Some(b"Alice".to_vec()),
+        ],
+    }).await?;
+    
+    // Send completion
+    write_message(&mut stream, BackendMessage::CommandComplete {
+        tag: "SELECT 1".to_string(),
+    }).await?;
+    
+    // Ready for next query
+    write_message(&mut stream, BackendMessage::ReadyForQuery {
+        state: TransactionState::Idle,
+    }).await?;
+}
+```
+
+### Extended Query Flow
+
+```rust
+// Parse
+let msg = read_message(&mut stream).await?;
+if let FrontendMessage::Parse { statement_name, query, .. } = msg {
+    write_message(&mut stream, BackendMessage::ParseComplete).await?;
+}
+
+// Bind
+let msg = read_message(&mut stream).await?;
+if let FrontendMessage::Bind { .. } = msg {
+    write_message(&mut stream, BackendMessage::BindComplete).await?;
+}
+
+// Describe
+let msg = read_message(&mut stream).await?;
+if let FrontendMessage::Describe { target, name } = msg {
+    write_message(&mut stream, BackendMessage::RowDescription {
+        fields: vec![/* ... */],
+    }).await?;
+}
+
+// Execute
+let msg = read_message(&mut stream).await?;
+if let FrontendMessage::Execute { portal_name, max_rows } = msg {
+    // Send data rows...
+    write_message(&mut stream, BackendMessage::CommandComplete {
+        tag: "SELECT 1".to_string(),
+    }).await?;
+}
+
+// Sync
+let msg = read_message(&mut stream).await?;
+if let FrontendMessage::Sync = msg {
+    write_message(&mut stream, BackendMessage::ReadyForQuery {
+        state: TransactionState::Idle,
+    }).await?;
+}
+```
+
+## Dependencies
+
+```toml
+anyhow = "1"
+bytes = "1"
+tokio = { version = "1", features = ["io-util", "net"] }
+datacave-core = { path = "../datacave-core" }
+```

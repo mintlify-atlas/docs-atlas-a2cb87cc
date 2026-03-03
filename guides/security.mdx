@@ -1,0 +1,695 @@
+---
+title: Security
+description: Learn how to configure authentication, roles, TLS encryption, encryption at rest, audit logging, and password hashing in Datacave
+---
+
+Datacave provides multiple security features to protect your data and control access. This guide covers authentication, role-based access control, TLS encryption, encryption at rest, and audit logging.
+
+## Authentication
+
+Datacave supports username/password authentication using the PostgreSQL cleartext password authentication flow.
+
+### Enabling Authentication
+
+Authentication is configured in your `config.toml` file:
+
+```toml
+[security.auth]
+enabled = true
+
+[[security.auth.users]]
+username = "admin"
+password_plain = "change-me"
+roles = ["admin"]
+```
+
+When `enabled = true`, all clients must provide valid credentials to connect.
+
+<Warning>
+If authentication is disabled (`enabled = false`), anyone can connect to your database without credentials. Only disable authentication in isolated development environments.
+</Warning>
+
+### Configuring Users
+
+Define users in the `[[security.auth.users]]` array:
+
+```toml
+[[security.auth.users]]
+username = "alice"
+password_plain = "alice-secret"
+roles = ["writer"]
+
+[[security.auth.users]]
+username = "bob"
+password_plain = "bob-secret"
+roles = ["reader"]
+```
+
+Each user requires:
+
+- `username`: Unique username for authentication
+- `password_plain` or `password_hash`: User's password (see Password Hashing below)
+- `roles`: Array of role names assigned to this user
+
+<Note>
+Datacave validates that every user has at least one password (plain or hashed) and at least one role assigned.
+</Note>
+
+## Roles and Permissions
+
+Datacave uses role-based access control (RBAC). Each user is assigned one or more roles, and each role defines permissions.
+
+### Built-in Roles
+
+The example configuration defines three standard roles:
+
+```toml
+[[security.auth.roles]]
+name = "reader"
+can_read = true
+can_write = false
+is_admin = false
+
+[[security.auth.roles]]
+name = "writer"
+can_read = true
+can_write = true
+is_admin = false
+
+[[security.auth.roles]]
+name = "admin"
+can_read = true
+can_write = true
+is_admin = true
+```
+
+### Role Permissions
+
+Each role has three permission flags:
+
+| Permission | Description |
+|------------|-------------|
+| `can_read` | Allow SELECT queries |
+| `can_write` | Allow INSERT, UPDATE, DELETE statements |
+| `is_admin` | Admin privileges (includes read and write) |
+
+<Steps>
+  <Step title="Define roles">
+    Create roles that match your access control needs:
+    
+    ```toml
+    [[security.auth.roles]]
+    name = "analytics"
+    can_read = true
+    can_write = false
+    is_admin = false
+    
+    [[security.auth.roles]]
+    name = "application"
+    can_read = true
+    can_write = true
+    is_admin = false
+    ```
+  </Step>
+  
+  <Step title="Assign roles to users">
+    Users can have multiple roles. Permissions are cumulative:
+    
+    ```toml
+    [[security.auth.users]]
+    username = "app_user"
+    password_plain = "secret"
+    roles = ["reader", "writer"]  # Has both read and write permissions
+    ```
+  </Step>
+  
+  <Step title="Verify permissions">
+    The `AuthManager` in `auth.rs` calculates effective permissions:
+    
+    ```rust
+    let can_read = role_defs.iter().any(|role| role.can_read || role.is_admin);
+    let can_write = role_defs.iter().any(|role| role.can_write || role.is_admin);
+    let is_admin = role_defs.iter().any(|role| role.is_admin);
+    ```
+    
+    A user has a permission if **any** of their roles grants it.
+  </Step>
+</Steps>
+
+### Custom Roles Example
+
+```toml
+# Read-only analyst
+[[security.auth.roles]]
+name = "analyst"
+can_read = true
+can_write = false
+is_admin = false
+
+# Application service account (read/write, not admin)
+[[security.auth.roles]]
+name = "service"
+can_read = true
+can_write = true
+is_admin = false
+
+# Database administrator (full access)
+[[security.auth.roles]]
+name = "dba"
+can_read = true
+can_write = true
+is_admin = true
+
+# Users
+[[security.auth.users]]
+username = "data_analyst"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+roles = ["analyst"]
+
+[[security.auth.users]]
+username = "api_service"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+roles = ["service"]
+
+[[security.auth.users]]
+username = "admin"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+roles = ["dba"]
+```
+
+## Password Hashing
+
+Datacave supports two password storage methods:
+
+- `password_plain`: Plain text password (development only)
+- `password_hash`: Argon2id password hash (production)
+
+<Warning>
+Never use `password_plain` in production. Always use `password_hash` with Argon2id hashes.
+</Warning>
+
+### Generating Password Hashes
+
+Use the `gen-password-hash` command to generate secure password hashes:
+
+<Steps>
+  <Step title="Run the password hash generator">
+    ```bash
+    cargo run -p datacave-server -- gen-password-hash --password "your-secure-password"
+    ```
+    
+    Output:
+    ```
+    $argon2id$v=19$m=19456,t=2,p=1$SomeBase64Salt$SomeBase64Hash
+    ```
+  </Step>
+  
+  <Step title="Copy the hash to your config">
+    Add the hash to your `config.toml`:
+    
+    ```toml
+    [[security.auth.users]]
+    username = "admin"
+    password_hash = "$argon2id$v=19$m=19456,t=2,p=1$SomeBase64Salt$SomeBase64Hash"
+    roles = ["admin"]
+    ```
+  </Step>
+  
+  <Step title="Remove password_plain">
+    Ensure `password_plain` is removed or commented out:
+    
+    ```toml
+    [[security.auth.users]]
+    username = "admin"
+    # password_plain = "change-me"  # Remove this
+    password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+    roles = ["admin"]
+    ```
+  </Step>
+</Steps>
+
+### Argon2id Parameters
+
+Datacave uses Argon2id with default parameters from the `argon2` crate:
+
+- **Memory**: 19456 KiB (19 MiB)
+- **Iterations**: 2
+- **Parallelism**: 1
+
+These parameters balance security and performance. Argon2id is the recommended password hashing algorithm (winner of the Password Hashing Competition).
+
+### Authentication Flow
+
+When a client connects:
+
+1. Client sends username in the startup message
+2. Datacave responds with `AuthenticationCleartextPassword`
+3. Client sends password in a `Password` message
+4. Datacave verifies the password:
+   - If `password_hash` is set: verifies using Argon2id
+   - If `password_plain` is set: compares directly
+5. On success: sends `AuthenticationOk` and `ReadyForQuery`
+6. On failure: sends `ErrorResponse` and closes connection
+
+See `auth.rs:35-52` for the implementation:
+
+```rust
+if let Some(hash) = &user.password_hash {
+    let parsed = PasswordHash::new(hash)
+        .map_err(|err| anyhow!("invalid password hash: {err}"))?;
+    Argon2::default()
+        .verify_password(password.as_bytes(), &parsed)
+        .map_err(|_| anyhow!("invalid password"))?;
+} else if let Some(plain) = &user.password_plain {
+    if plain != password {
+        return Err(anyhow!("invalid password"));
+    }
+}
+```
+
+## TLS Encryption
+
+Datacave supports TLS to encrypt client-server communication.
+
+### Enabling TLS
+
+Configure TLS in your `config.toml`:
+
+```toml
+[security.tls]
+enabled = true
+cert_path = "./certs/server.crt"
+key_path = "./certs/server.key"
+```
+
+<Steps>
+  <Step title="Generate TLS certificates">
+    Create a self-signed certificate for testing:
+    
+    ```bash
+    mkdir -p certs
+    openssl req -x509 -newkey rsa:4096 -nodes \
+      -keyout certs/server.key \
+      -out certs/server.crt \
+      -days 365 \
+      -subj "/CN=localhost"
+    ```
+    
+    For production, use certificates from a trusted CA (Let's Encrypt, etc.).
+  </Step>
+  
+  <Step title="Configure TLS paths">
+    Update `config.toml` with the certificate paths:
+    
+    ```toml
+    [security.tls]
+    enabled = true
+    cert_path = "./certs/server.crt"
+    key_path = "./certs/server.key"
+    ```
+  </Step>
+  
+  <Step title="Connect with TLS">
+    PostgreSQL clients support TLS via the `sslmode` parameter:
+    
+    ```bash
+    psql "host=127.0.0.1 port=5433 user=admin dbname=default sslmode=require"
+    ```
+    
+    For self-signed certificates, use `sslmode=require` (skips certificate verification) or configure your client to trust the certificate.
+  </Step>
+</Steps>
+
+### TLS Connection Modes
+
+| sslmode | Description |
+|---------|-------------|
+| `disable` | No TLS (plain text) |
+| `allow` | Try TLS, fall back to plain text |
+| `prefer` | Prefer TLS, fall back to plain text |
+| `require` | Require TLS, skip certificate verification |
+| `verify-ca` | Require TLS, verify certificate CA |
+| `verify-full` | Require TLS, verify certificate CA and hostname |
+
+<Note>
+For production, use `sslmode=verify-full` with certificates from a trusted CA.
+</Note>
+
+### Language Driver TLS Examples
+
+**Python (psycopg2)**:
+
+```python
+import psycopg2
+
+conn = psycopg2.connect(
+    host="127.0.0.1",
+    port=5433,
+    user="admin",
+    password="change-me",
+    dbname="default",
+    sslmode="require"  # Enable TLS
+)
+```
+
+**Node.js (pg)**:
+
+```javascript
+const { Client } = require('pg');
+
+const client = new Client({
+  host: '127.0.0.1',
+  port: 5433,
+  user: 'admin',
+  password: 'change-me',
+  database: 'default',
+  ssl: {
+    rejectUnauthorized: false  // For self-signed certs
+  }
+});
+```
+
+**Rust (tokio-postgres)**:
+
+```rust
+use tokio_postgres::{NoTls, Error};
+use native_tls::TlsConnector;
+use postgres_native_tls::MakeTlsConnector;
+
+let connector = TlsConnector::builder()
+    .danger_accept_invalid_certs(true)  // For self-signed certs
+    .build()?;
+let tls = MakeTlsConnector::new(connector);
+
+let (client, connection) = tokio_postgres::connect(
+    "host=127.0.0.1 port=5433 user=admin password=change-me dbname=default",
+    tls,
+).await?;
+```
+
+## Encryption at Rest
+
+Datacave supports encryption of data files (WAL and SSTable files) at rest.
+
+### Enabling Encryption at Rest
+
+Configure storage encryption in your `config.toml`:
+
+```toml
+[storage]
+data_dir = "./data"
+wal_enabled = true
+memtable_max_bytes = 67108864
+sstable_target_bytes = 134217728
+encryption_enabled = true
+encryption_key_base64 = "REPLACE_WITH_BASE64_32_BYTES"
+compaction_interval_secs = 300
+```
+
+<Steps>
+  <Step title="Generate an encryption key">
+    Generate a secure 32-byte (256-bit) encryption key:
+    
+    ```bash
+    openssl rand -base64 32
+    ```
+    
+    Output:
+    ```
+    X7j3K9mP2qR5sT8uV1wY4zB6cD0eF3gH5iJ7kL9mN2o=
+    ```
+  </Step>
+  
+  <Step title="Configure the encryption key">
+    Add the key to `config.toml`:
+    
+    ```toml
+    [storage]
+    encryption_enabled = true
+    encryption_key_base64 = "X7j3K9mP2qR5sT8uV1wY4zB6cD0eF3gH5iJ7kL9mN2o="
+    ```
+    
+    <Warning>
+    Store encryption keys securely! Use a secrets management system (HashiCorp Vault, AWS Secrets Manager, etc.) in production. Never commit encryption keys to version control.
+    </Warning>
+  </Step>
+  
+  <Step title="Start Datacave with encryption">
+    When encryption is enabled, Datacave encrypts all WAL and SSTable files before writing to disk:
+    
+    ```bash
+    cargo run -p datacave-server -- serve --config config.toml
+    ```
+    
+    Existing unencrypted data is not automatically encrypted. Start with encryption enabled for new databases, or migrate data.
+  </Step>
+</Steps>
+
+### Key Rotation
+
+To rotate encryption keys:
+
+1. Generate a new encryption key
+2. Stop Datacave
+3. Decrypt existing data with the old key
+4. Re-encrypt with the new key
+5. Update `encryption_key_base64` in config
+6. Restart Datacave
+
+<Note>
+Datacave does not currently provide built-in key rotation tools. Plan key rotation procedures as part of your security policy.
+</Note>
+
+## Audit Logging
+
+Datacave supports audit logging to track database access and operations.
+
+### Enabling Audit Logs
+
+Configure audit logging in your `config.toml`:
+
+```toml
+[security.audit]
+enabled = true
+```
+
+When enabled, Datacave logs:
+
+- Connection attempts (success and failure)
+- Authentication events
+- SQL statements executed
+- Disconnections
+
+<Note>
+Audit logs are written to the server's standard output. In production, configure your deployment to capture logs (systemd journal, Docker logs, log aggregation service, etc.).
+</Note>
+
+### Audit Log Format
+
+Audit logs use structured logging with the `tracing` crate. Example log entries:
+
+```
+2026-03-03T10:23:45.123Z INFO datacave_server::server: connection accepted remote_addr=127.0.0.1:54321
+2026-03-03T10:23:45.234Z INFO datacave_server::server: authentication successful user=admin
+2026-03-03T10:23:45.345Z INFO datacave_server::server: query executed user=admin query="SELECT * FROM users"
+2026-03-03T10:23:46.456Z WARN datacave_server::server: authentication failed user=attacker reason="unknown user"
+```
+
+### Centralized Logging
+
+For production deployments, send audit logs to a centralized logging system:
+
+**Docker**:
+
+```bash
+docker run -d \
+  --name datacave \
+  --log-driver=syslog \
+  --log-opt syslog-address=udp://logs.example.com:514 \
+  datacave:latest
+```
+
+**systemd**:
+
+Logs are automatically captured in the systemd journal:
+
+```bash
+journalctl -u datacave -f
+```
+
+**Cloud Platforms**:
+
+- AWS: CloudWatch Logs
+- GCP: Cloud Logging
+- Azure: Azure Monitor
+
+## Security Best Practices
+
+<Steps>
+  <Step title="Use strong passwords">
+    Require strong passwords for all users:
+    
+    - Minimum 12 characters
+    - Mix of letters, numbers, and symbols
+    - Avoid common words and patterns
+    - Use a password manager to generate and store passwords
+  </Step>
+  
+  <Step title="Enable all security features">
+    For production deployments:
+    
+    ```toml
+    [security.auth]
+    enabled = true  # Require authentication
+    
+    [security.tls]
+    enabled = true  # Encrypt connections
+    
+    [storage]
+    encryption_enabled = true  # Encrypt data at rest
+    
+    [security.audit]
+    enabled = true  # Log all access
+    ```
+  </Step>
+  
+  <Step title="Follow the principle of least privilege">
+    Grant users only the permissions they need:
+    
+    - Read-only users: `can_read = true`, `can_write = false`
+    - Application users: `can_read = true`, `can_write = true`, `is_admin = false`
+    - Administrators: `is_admin = true` (only for trusted operators)
+  </Step>
+  
+  <Step title="Rotate credentials regularly">
+    Implement a credential rotation policy:
+    
+    - Change passwords every 90 days
+    - Rotate encryption keys annually
+    - Revoke access for former team members immediately
+  </Step>
+  
+  <Step title="Monitor audit logs">
+    Review audit logs regularly for:
+    
+    - Failed authentication attempts (potential attacks)
+    - Unusual query patterns
+    - Access from unexpected IP addresses
+    - Admin operations
+  </Step>
+  
+  <Step title="Secure the configuration file">
+    Protect your `config.toml`:
+    
+    ```bash
+    chmod 600 config.toml  # Only owner can read/write
+    ```
+    
+    Never commit `config.toml` with real credentials to version control.
+  </Step>
+  
+  <Step title="Use TLS certificates from a trusted CA">
+    For production, obtain certificates from Let's Encrypt or another trusted CA. Avoid self-signed certificates in production.
+  </Step>
+</Steps>
+
+## Configuration Validation
+
+Datacave validates security configuration on startup. See `config.rs:96-125` for validation rules:
+
+```rust
+if self.storage.encryption_enabled && self.storage.encryption_key_base64.is_none() {
+    return Err(anyhow!("storage encryption enabled but key missing"));
+}
+if self.security.tls.enabled {
+    if self.security.tls.cert_path.is_none() || self.security.tls.key_path.is_none() {
+        return Err(anyhow!("tls enabled but cert_path or key_path missing"));
+    }
+}
+if self.security.auth.enabled && self.security.auth.users.is_empty() {
+    return Err(anyhow!("auth enabled but no users configured"));
+}
+```
+
+Use the `check-config` command to validate your configuration:
+
+```bash
+cargo run -p datacave-server -- check-config --config config.toml
+```
+
+## Example Production Configuration
+
+```toml
+[server]
+listen_addr = "0.0.0.0:5433"
+max_connections = 1024
+idle_timeout_secs = 300
+
+[storage]
+data_dir = "/var/lib/datacave/data"
+wal_enabled = true
+memtable_max_bytes = 67108864
+sstable_target_bytes = 134217728
+encryption_enabled = true
+encryption_key_base64 = "X7j3K9mP2qR5sT8uV1wY4zB6cD0eF3gH5iJ7kL9mN2o="
+compaction_interval_secs = 300
+
+[sharding]
+shard_count = 4
+
+[cluster]
+replication_factor = 3
+
+[metrics]
+listen_addr = "127.0.0.1:9898"
+
+[security.tls]
+enabled = true
+cert_path = "/etc/datacave/tls/server.crt"
+key_path = "/etc/datacave/tls/server.key"
+
+[security.auth]
+enabled = true
+
+[[security.auth.roles]]
+name = "reader"
+can_read = true
+can_write = false
+is_admin = false
+
+[[security.auth.roles]]
+name = "writer"
+can_read = true
+can_write = true
+is_admin = false
+
+[[security.auth.roles]]
+name = "admin"
+can_read = true
+can_write = true
+is_admin = true
+
+[[security.auth.users]]
+username = "app_service"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+roles = ["writer"]
+
+[[security.auth.users]]
+username = "analytics"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+roles = ["reader"]
+
+[[security.auth.users]]
+username = "admin"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+roles = ["admin"]
+
+[security.audit]
+enabled = true
+```
+
+## Next Steps
+
+- Learn about [Connecting Clients](/guides/connecting-clients) to use secure connections
+- Review [Data Modeling](/guides/data-modeling) for schema design
+- Explore [Configuration Reference](/operations/configuration) for all config options

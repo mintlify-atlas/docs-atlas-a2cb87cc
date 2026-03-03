@@ -1,0 +1,363 @@
+---
+title: Data Modeling
+description: Learn how to design tables, choose data types, define primary keys, and follow schema best practices in Datacave
+---
+
+Datacave uses an LSM-based storage engine optimized for write-heavy workloads. Understanding how to model your data effectively will help you get the best performance from your database.
+
+## Supported Data Types
+
+Datacave supports the following column data types:
+
+| Type | Description | Storage | Example |
+|------|-------------|---------|----------|
+| `INT` | 32-bit signed integer | 4 bytes | `42`, `-100` |
+| `BIGINT` | 64-bit signed integer | 8 bytes | `9223372036854775807` |
+| `FLOAT` | 64-bit floating point | 8 bytes | `3.14159`, `-0.001` |
+| `TEXT` | Variable-length string | Variable | `'Hello, World!'` |
+| `BOOLEAN` | True or false | 1 byte | `true`, `false` |
+
+<Note>
+Datacave currently supports these five core data types. Additional types (TIMESTAMP, JSON, BYTEA, etc.) are planned for future releases.
+</Note>
+
+## Creating Tables
+
+Use the `CREATE TABLE` statement to define a new table:
+
+```sql
+CREATE TABLE products (
+  id BIGINT PRIMARY KEY,
+  name TEXT,
+  price FLOAT,
+  stock_count INT,
+  available BOOLEAN
+);
+```
+
+<Steps>
+  <Step title="Define column names and types">
+    Each column needs a name and a data type. Choose types based on your data:
+    
+    - Use `BIGINT` for IDs and large numbers
+    - Use `INT` for smaller numeric values (counters, quantities)
+    - Use `FLOAT` for decimal values (prices, measurements)
+    - Use `TEXT` for strings of any length
+    - Use `BOOLEAN` for true/false flags
+  </Step>
+  
+  <Step title="Specify a primary key">
+    Every table should have a primary key. The primary key uniquely identifies each row:
+    
+    ```sql
+    CREATE TABLE users (
+      id BIGINT PRIMARY KEY,
+      email TEXT,
+      created_at BIGINT
+    );
+    ```
+    
+    <Warning>
+    Datacave currently requires exactly one primary key column per table. Composite primary keys (multiple columns) are not yet supported.
+    </Warning>
+  </Step>
+  
+  <Step title="Execute the CREATE TABLE statement">
+    Run the statement using your client (psql, driver, etc.). The table is immediately available for inserts and queries.
+  </Step>
+</Steps>
+
+## Primary Keys
+
+Primary keys are critical for data integrity and query performance in Datacave.
+
+### Best Practices
+
+<Steps>
+  <Step title="Use BIGINT for primary keys">
+    `BIGINT` provides a large range of values and is ideal for auto-incrementing IDs or timestamps:
+    
+    ```sql
+    CREATE TABLE orders (
+      order_id BIGINT PRIMARY KEY,
+      customer_id BIGINT,
+      total_amount FLOAT
+    );
+    ```
+  </Step>
+  
+  <Step title="Choose monotonically increasing keys">
+    LSM storage engines perform best with keys that increase over time. Good choices:
+    
+    - Auto-incrementing integers: `1, 2, 3, ...`
+    - Unix timestamps: `1678901234, 1678901235, ...`
+    - Snowflake IDs or ULIDs (as BIGINT)
+    
+    Avoid random UUIDs as primary keys - they cause write amplification in LSM storage.
+  </Step>
+  
+  <Step title="Ensure uniqueness">
+    Primary key values must be unique. Datacave will reject duplicate inserts:
+    
+    ```sql
+    INSERT INTO users VALUES (1, 'alice@example.com', 1678901234);
+    INSERT INTO users VALUES (1, 'bob@example.com', 1678901235);
+    -- Second insert fails: duplicate primary key
+    ```
+  </Step>
+</Steps>
+
+<Note>
+Datacave does not support auto-increment columns yet. Generate primary key values in your application (e.g., using a sequence, timestamp, or ID generator library).
+</Note>
+
+## Schema Design Patterns
+
+### User Accounts Table
+
+```sql
+CREATE TABLE users (
+  user_id BIGINT PRIMARY KEY,
+  username TEXT,
+  email TEXT,
+  is_active BOOLEAN
+);
+```
+
+- Use `BIGINT` for the primary key
+- Store email and username as `TEXT`
+- Use `BOOLEAN` for status flags
+
+### Time-Series Events
+
+```sql
+CREATE TABLE events (
+  event_id BIGINT PRIMARY KEY,
+  user_id BIGINT,
+  event_type TEXT,
+  timestamp BIGINT,
+  value FLOAT
+);
+```
+
+- Use timestamp (Unix epoch in milliseconds) as primary key for natural ordering
+- Store foreign keys (e.g., `user_id`) as `BIGINT`
+- Store measurements as `FLOAT`
+
+<Note>
+This pattern leverages LSM storage's strength with sequential writes. Events are naturally ordered by time.
+</Note>
+
+### Product Catalog
+
+```sql
+CREATE TABLE products (
+  product_id BIGINT PRIMARY KEY,
+  name TEXT,
+  description TEXT,
+  price FLOAT,
+  stock_quantity INT,
+  active BOOLEAN
+);
+```
+
+- Use descriptive column names
+- Store prices as `FLOAT`
+- Use `INT` for quantities
+
+## Joins and Foreign Keys
+
+Datacave supports `INNER JOIN` and `LEFT JOIN` for querying related tables.
+
+### Defining Relationships
+
+```sql
+-- Customers table
+CREATE TABLE customers (
+  customer_id BIGINT PRIMARY KEY,
+  name TEXT,
+  email TEXT
+);
+
+-- Orders table with foreign key column
+CREATE TABLE orders (
+  order_id BIGINT PRIMARY KEY,
+  customer_id BIGINT,  -- Foreign key (not enforced)
+  order_date BIGINT,
+  total FLOAT
+);
+```
+
+<Warning>
+Datacave does not enforce foreign key constraints. You must ensure referential integrity in your application logic.
+</Warning>
+
+### Querying with Joins
+
+```sql
+-- INNER JOIN: only matching rows
+SELECT customers.name, orders.order_id, orders.total
+FROM customers
+INNER JOIN orders ON customers.customer_id = orders.customer_id;
+
+-- LEFT JOIN: all customers, even without orders
+SELECT customers.name, orders.order_id
+FROM customers
+LEFT JOIN orders ON customers.customer_id = orders.customer_id;
+```
+
+Datacave supports multi-table joins (3+ tables):
+
+```sql
+SELECT c.name, o.order_id, p.name AS product_name
+FROM customers c
+INNER JOIN orders o ON c.customer_id = o.customer_id
+INNER JOIN order_items oi ON o.order_id = oi.order_id
+INNER JOIN products p ON oi.product_id = p.product_id;
+```
+
+## Schema Limitations
+
+<Warning>
+Datacave has the following schema limitations in the current version:
+
+- No composite primary keys (multi-column primary keys)
+- No foreign key constraints
+- No CHECK constraints
+- No DEFAULT values
+- No auto-increment / SERIAL columns
+- No indexes (other than primary key)
+- No ALTER TABLE support
+</Warning>
+
+### Workarounds
+
+**Auto-increment**: Generate IDs in your application:
+
+```python
+# Python example
+import time
+
+def generate_id():
+    return int(time.time() * 1000)  # Millisecond timestamp
+
+user_id = generate_id()
+cur.execute("INSERT INTO users VALUES (%s, %s, %s)",
+            (user_id, "alice", "alice@example.com"))
+```
+
+**Default values**: Set defaults in application code:
+
+```javascript
+// Node.js example
+const newUser = {
+  id: Date.now(),
+  username: 'alice',
+  email: 'alice@example.com',
+  is_active: true  // Default value
+};
+
+await client.query(
+  'INSERT INTO users VALUES ($1, $2, $3, $4)',
+  [newUser.id, newUser.username, newUser.email, newUser.is_active]
+);
+```
+
+## Schema Best Practices
+
+<Steps>
+  <Step title="Plan your schema before creating tables">
+    Datacave does not support `ALTER TABLE` yet. Design your schema carefully:
+    
+    - List all required columns and their types
+    - Choose appropriate primary keys
+    - Document relationships between tables
+  </Step>
+  
+  <Step title="Use consistent naming conventions">
+    Choose a naming style and stick to it:
+    
+    - `snake_case` for column names: `user_id`, `created_at`
+    - Plural table names: `users`, `orders`, `products`
+    - Descriptive column names: `email` instead of `e`, `order_total` instead of `tot`
+  </Step>
+  
+  <Step title="Normalize data appropriately">
+    Balance normalization with query performance:
+    
+    - **Normalize** to reduce redundancy: separate `customers` and `orders` tables
+    - **Denormalize** for read-heavy queries: include frequently accessed data in one table
+    
+    LSM storage handles writes efficiently, so moderate denormalization is acceptable.
+  </Step>
+  
+  <Step title="Document your schema">
+    Keep a schema document with:
+    
+    - Table purposes and relationships
+    - Column descriptions
+    - Expected data ranges and formats
+    - Sample queries
+  </Step>
+</Steps>
+
+## Handling Schema Changes
+
+Since `ALTER TABLE` is not yet supported, schema changes require recreating tables:
+
+<Steps>
+  <Step title="Create a new table with the updated schema">
+    ```sql
+    CREATE TABLE users_v2 (
+      user_id BIGINT PRIMARY KEY,
+      username TEXT,
+      email TEXT,
+      is_active BOOLEAN,
+      created_at BIGINT  -- New column
+    );
+    ```
+  </Step>
+  
+  <Step title="Migrate data from the old table">
+    ```sql
+    INSERT INTO users_v2 (user_id, username, email, is_active, created_at)
+    SELECT user_id, username, email, is_active, 0 FROM users;
+    ```
+  </Step>
+  
+  <Step title="Update application code">
+    Point your application to the new table name or drop the old table and rename the new one (if DROP TABLE is supported).
+  </Step>
+</Steps>
+
+<Note>
+Plan for migration windows when making schema changes. Consider maintaining backward compatibility during transitions.
+</Note>
+
+## Performance Considerations
+
+### Write Optimization
+
+LSM storage excels at sequential writes:
+
+- Insert rows in primary key order when possible
+- Batch inserts in transactions for better throughput
+- Avoid random primary keys (UUIDs)
+
+### Read Optimization
+
+- Use primary key lookups for single-row queries: `WHERE id = ?`
+- Limit result sets with `LIMIT` clauses
+- Use `SELECT` with specific columns instead of `SELECT *`
+
+### Storage Efficiency
+
+- Use `INT` instead of `BIGINT` when the value range permits
+- Keep `TEXT` fields reasonably sized (consider application-level truncation)
+- Use `BOOLEAN` instead of `INT` for true/false flags
+
+## Next Steps
+
+- Learn about [Transactions](/guides/transactions) for multi-statement operations
+- Review [SQL Compatibility](/sql/compatibility) for supported features
+- Explore [Security](/guides/security) for access control and encryption

@@ -1,0 +1,267 @@
+---
+title: Deployment
+description: Deploy Datacave using binary, Docker, or building from source with complete system requirements
+---
+
+## System Requirements
+
+### Minimum Requirements
+
+- **CPU**: 2 cores
+- **Memory**: 4 GB RAM
+- **Disk**: 20 GB available space
+- **OS**: Linux (Debian/Ubuntu recommended), macOS, or Windows with WSL2
+
+### Recommended Requirements
+
+- **CPU**: 4+ cores
+- **Memory**: 8+ GB RAM
+- **Disk**: SSD with 100+ GB available space
+- **OS**: Linux (Debian Bookworm or Ubuntu 22.04+)
+- **Network**: Low-latency network for cluster deployments
+
+### Software Prerequisites
+
+- **Rust toolchain**: 1.75 or later (for building from source)
+- **PostgreSQL-compatible client**: `psql`, DBeaver, or any language driver supporting the PostgreSQL wire protocol
+
+## Deployment Methods
+
+<Tabs>
+  <Tab title="Docker">
+    ### Using Docker
+
+    The easiest way to run Datacave is using the official Docker image.
+
+    #### Quick Start
+
+    ```bash
+    docker run -p 5433:5433 -p 9898:9898 \
+      -v $(pwd)/data:/home/datacave/data \
+      -v $(pwd)/config.toml:/home/datacave/config.toml \
+      datacave/datacave-server:latest
+    ```
+
+    #### Build from Dockerfile
+
+    ```bash
+    # Clone the repository
+    git clone https://github.com/yourusername/datacave.git
+    cd datacave
+
+    # Build the Docker image
+    docker build -t datacave-server .
+
+    # Run the container
+    docker run -d \
+      --name datacave \
+      -p 5433:5433 \
+      -p 9898:9898 \
+      -v $(pwd)/data:/home/datacave/data \
+      -v $(pwd)/config.toml:/home/datacave/config.toml \
+      datacave-server
+    ```
+
+    #### Docker Compose
+
+    ```yaml
+    version: '3.8'
+    services:
+      datacave:
+        image: datacave-server:latest
+        ports:
+          - "5433:5433"
+          - "9898:9898"
+        volumes:
+          - ./data:/home/datacave/data
+          - ./config.toml:/home/datacave/config.toml
+        restart: unless-stopped
+    ```
+
+    The Dockerfile uses a multi-stage build:
+    - **Builder stage**: Compiles the `datacave-server` binary using Rust 1.75
+    - **Runtime stage**: Uses `debian:bookworm-slim` for a minimal runtime image
+    - **User**: Runs as non-root `datacave` user for security
+    - **Exposed ports**: 5433 (database), 9898 (metrics)
+
+  </Tab>
+  <Tab title="Binary">
+    ### Pre-built Binary
+
+    Download the latest release binary for your platform:
+
+    ```bash
+    # Download binary (replace with actual release URL)
+    wget https://github.com/yourusername/datacave/releases/latest/download/datacave-server-linux-x64
+    chmod +x datacave-server-linux-x64
+    mv datacave-server-linux-x64 /usr/local/bin/datacave-server
+    ```
+
+    #### Create Configuration
+
+    ```bash
+    # Download example configuration
+    wget https://raw.githubusercontent.com/yourusername/datacave/main/config.example.toml -O config.toml
+
+    # Edit configuration as needed
+    vim config.toml
+    ```
+
+    #### Run the Server
+
+    ```bash
+    datacave-server serve --config config.toml
+    ```
+
+    #### Systemd Service
+
+    Create `/etc/systemd/system/datacave.service`:
+
+    ```ini
+    [Unit]
+    Description=Datacave Database Server
+    After=network.target
+
+    [Service]
+    Type=simple
+    User=datacave
+    Group=datacave
+    ExecStart=/usr/local/bin/datacave-server serve --config /etc/datacave/config.toml
+    Restart=on-failure
+    RestartSec=5s
+
+    [Install]
+    WantedBy=multi-user.target
+    ```
+
+    Enable and start the service:
+
+    ```bash
+    sudo systemctl daemon-reload
+    sudo systemctl enable datacave
+    sudo systemctl start datacave
+    sudo systemctl status datacave
+    ```
+
+  </Tab>
+  <Tab title="Build from Source">
+    ### Building from Source
+
+    #### Prerequisites
+
+    - Rust toolchain 1.75 or later
+    - Git
+
+    #### Clone and Build
+
+    ```bash
+    # Clone the repository
+    git clone https://github.com/yourusername/datacave.git
+    cd datacave
+
+    # Build the server binary
+    cargo build --release -p datacave-server
+
+    # The binary will be in target/release/datacave-server
+    ```
+
+    #### Install
+
+    ```bash
+    # Copy binary to system path
+    sudo cp target/release/datacave-server /usr/local/bin/
+
+    # Copy example config
+    cp config.example.toml config.toml
+    ```
+
+    #### Run
+
+    ```bash
+    # Development mode
+    cargo run -p datacave-server -- serve --config config.example.toml
+
+    # Or using the installed binary
+    datacave-server serve --config config.toml
+    ```
+
+    #### Build with Make
+
+    ```bash
+    # Build all workspace crates
+    make build
+
+    # Run tests
+    make test
+
+    # Run linting
+    make lint
+
+    # Run benchmarks
+    make bench
+
+    # Run the server
+    make run
+    ```
+
+  </Tab>
+</Tabs>
+
+## Initial Setup
+
+### Generate Password Hash
+
+For secure production deployments, generate password hashes instead of using plain passwords:
+
+```bash
+datacave-server gen-password-hash --password "your-secure-password"
+```
+
+Add the hash to your `config.toml` under `security.auth.users`.
+
+### Connect with psql
+
+Once the server is running, connect using any PostgreSQL client:
+
+```bash
+psql "host=127.0.0.1 port=5433 user=admin dbname=default"
+```
+
+### Verify Installation
+
+Check the health endpoints:
+
+```bash
+# Health check
+curl http://127.0.0.1:9898/health
+
+# Readiness check
+curl http://127.0.0.1:9898/ready
+
+# Metrics
+curl http://127.0.0.1:9898/metrics
+```
+
+## Port Configuration
+
+- **5433**: Database server (PostgreSQL wire protocol)
+- **9898**: Metrics and health endpoints
+
+Ensure these ports are open in your firewall if accessing remotely.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Configuration" icon="gear" href="/operations/configuration">
+    Configure server, storage, and security settings
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Set up metrics and health checks
+  </Card>
+  <Card title="Clustering" icon="server" href="/operations/clustering">
+    Configure sharding and replication
+  </Card>
+  <Card title="Security" icon="shield" href="/guides/security">
+    Enable TLS and authentication
+  </Card>
+</CardGroup>

@@ -1,0 +1,366 @@
+---
+title: Join Reference
+description: INNER JOIN, LEFT JOIN, multi-table joins, and join syntax
+---
+
+Datacave supports INNER JOIN and LEFT JOIN for combining rows from multiple tables.
+
+## INNER JOIN
+
+Return rows where the join condition matches in both tables.
+
+### Syntax
+
+```sql
+SELECT column_list
+FROM table1
+INNER JOIN table2 ON condition
+[INNER JOIN table3 ON condition ...]
+```
+
+### ON Clause
+
+Specify equality condition between columns:
+
+```sql
+ON table1.column = table2.column
+```
+
+### USING Clause
+
+Alternative syntax when join columns have the same name:
+
+```sql
+USING (column_name)
+```
+
+### Examples
+
+<CodeGroup>
+```sql Two-Table Join
+SELECT orders.id, users.name, orders.amount
+FROM orders
+INNER JOIN users ON orders.user_id = users.id;
+```
+
+```sql Using USING
+SELECT orders.id, users.name
+FROM orders
+INNER JOIN users USING (id);
+```
+
+```sql Select All Columns
+SELECT *
+FROM orders
+INNER JOIN users ON orders.user_id = users.id;
+```
+</CodeGroup>
+
+### Test Example
+
+```sql test: select_inner_join
+-- Tables:
+-- users(id, name): (1, 'alice'), (2, 'bob')
+-- orders(id, user_id, amount): (1, 1, 100), (2, 2, 200)
+
+SELECT orders.id, users.name 
+FROM orders 
+INNER JOIN users ON orders.user_id = users.id;
+
+-- Result (2 rows):
+-- orders.id=1, users.name='alice'
+-- orders.id=2, users.name='bob'
+```
+
+## LEFT JOIN
+
+Return all rows from the left table, with matching rows from the right table (or NULL if no match).
+
+### Syntax
+
+```sql
+SELECT column_list
+FROM table1
+LEFT JOIN table2 ON condition
+```
+
+### Examples
+
+<CodeGroup>
+```sql Basic LEFT JOIN
+SELECT orders.id, users.name, orders.amount
+FROM orders
+LEFT JOIN users ON orders.user_id = users.id;
+```
+
+```sql With WHERE
+SELECT orders.id, users.name
+FROM orders
+LEFT JOIN users ON orders.user_id = users.id
+WHERE orders.amount > 100;
+```
+</CodeGroup>
+
+### NULL Handling
+
+When the left table row has no match in the right table:
+- Left table columns: actual values
+- Right table columns: `NULL`
+
+### Test Example
+
+```sql test: select_left_join
+-- Tables:
+-- users(id, name): (1, 'alice'), (2, 'bob')
+-- orders(id, user_id, amount): (1, 1, 100), (2, 2, 200), (3, 99, 50)
+
+SELECT orders.id, users.name, orders.amount
+FROM orders
+LEFT JOIN users ON orders.user_id = users.id;
+
+-- Result (3 rows):
+-- orders.id=1, users.name='alice', amount=100
+-- orders.id=2, users.name='bob', amount=200
+-- orders.id=3, users.name=NULL, amount=50  <- unmatched user_id 99
+```
+
+## Multi-Table Joins
+
+Datacave supports joining **3 or more tables** in a chain.
+
+### Syntax
+
+```sql
+SELECT column_list
+FROM table1
+JOIN table2 ON condition
+JOIN table3 ON condition
+[JOIN table4 ON condition ...]
+```
+
+### Join Order
+
+Joins are executed left-to-right:
+1. `table1 JOIN table2` produces intermediate result
+2. Result `JOIN table3` produces next intermediate result
+3. Continue for additional joins
+
+### Three-Table INNER JOIN
+
+```sql test: select_three_table_inner_join
+-- Tables:
+-- users(id, name): (1, 'alice'), (2, 'bob')
+-- orders(id, user_id, amount): (1, 1, 100), (2, 2, 200), (3, 1, 150)
+-- items(id, order_id, product): (1, 1, 'wand'), (2, 2, 'book'), (3, 3, 'hat')
+
+SELECT orders.id, users.name, items.product, orders.amount
+FROM orders
+INNER JOIN users ON orders.user_id = users.id
+INNER JOIN items ON orders.id = items.order_id;
+
+-- Result (3 rows):
+-- order 1, alice, wand, 100
+-- order 2, bob, book, 200
+-- order 3, alice, hat, 150
+```
+
+### Three-Table LEFT JOIN Chain
+
+```sql test: select_three_table_left_join_chain
+-- Same tables, but order 3 has user_id=99 (no match), and no items row
+-- orders: (1, 1, 100), (2, 2, 200), (3, 99, 50)
+-- items: (1, 1, 'wand'), (2, 2, 'book')
+
+SELECT orders.id, users.name, items.product
+FROM orders
+LEFT JOIN users ON orders.user_id = users.id
+LEFT JOIN items ON orders.id = items.order_id;
+
+-- Result (3 rows):
+-- order 1, alice, wand
+-- order 2, bob, book
+-- order 3, NULL, NULL  <- unmatched user_id 99 and no items row
+```
+
+### ON Clause Scoping
+
+Each `ON` condition must reference tables already in scope:
+
+```sql Valid
+FROM orders
+INNER JOIN users ON orders.user_id = users.id  -- ✅ orders in scope
+INNER JOIN items ON orders.id = items.order_id  -- ✅ orders, users in scope
+```
+
+```sql Invalid
+FROM orders
+INNER JOIN users ON users.id = items.order_id  -- ❌ items not yet in scope
+```
+
+## Column Name Conflicts
+
+When multiple tables have columns with the same name, use **qualified names**:
+
+```sql Qualified SELECT
+SELECT customers.name, products.name, orders.amount
+FROM orders
+INNER JOIN customers ON orders.customer_id = customers.id
+INNER JOIN products ON orders.product_id = products.id;
+```
+
+<Warning>
+When selecting multiple columns with the same unqualified name from different tables (e.g., `customers.name`, `products.name`), use qualified names in SELECT. Column order may vary.
+</Warning>
+
+## USING vs ON
+
+### USING Syntax
+
+Use when join columns have identical names:
+
+```sql
+SELECT * FROM orders
+INNER JOIN users USING (id);
+```
+
+Equivalent to:
+
+```sql
+SELECT * FROM orders
+INNER JOIN users ON orders.id = users.id;
+```
+
+### ON Syntax
+
+Use for explicit join conditions or when column names differ:
+
+```sql
+SELECT * FROM orders
+INNER JOIN users ON orders.user_id = users.id;
+```
+
+## Joins with Aggregations
+
+Combine joins with aggregate functions:
+
+```sql Join + COUNT
+SELECT users.name, COUNT(*) AS order_count
+FROM orders
+INNER JOIN users ON orders.user_id = users.id
+GROUP BY users.name;
+```
+
+```sql Join + SUM
+SELECT users.name, SUM(orders.amount) AS total
+FROM orders
+INNER JOIN users ON orders.user_id = users.id
+GROUP BY users.name;
+```
+
+See [Aggregations Reference](/sql/aggregations#aggregates-on-joined-rows) for more details.
+
+## Joins with WHERE
+
+Filter joined results:
+
+```sql WHERE on Joined Result
+SELECT orders.id, users.name, orders.amount
+FROM orders
+INNER JOIN users ON orders.user_id = users.id
+WHERE orders.amount > 100;
+```
+
+Execution order:
+1. Perform join
+2. Apply WHERE filter to joined rows
+3. Return matching rows
+
+## Joins with ORDER BY and LIMIT
+
+Sort and paginate joined results:
+
+```sql test: select_join_order_by_limit
+SELECT orders.id, users.name, orders.amount
+FROM orders
+INNER JOIN users ON orders.user_id = users.id
+ORDER BY orders.amount DESC
+LIMIT 2;
+
+-- Returns top 2 orders by amount
+```
+
+Execution order:
+1. Perform join
+2. Sort by `orders.amount DESC`
+3. Take first 2 rows
+
+## Unsupported Join Types
+
+<Warning>
+The following join types are **not supported**:
+
+- `RIGHT JOIN`
+- `FULL OUTER JOIN`
+- `CROSS JOIN`
+- Self-joins (table joined with itself)
+- Non-equality joins (`ON t1.amount > t2.threshold`)
+
+The planner returns `None` for these join types.
+</Warning>
+
+## Join Implementation Notes
+
+Datacave joins are implemented as:
+
+1. **Scan left table**: Load all rows into memory
+2. **Scan right table**: For each row, find matches in left table
+3. **Combine matches**: Create joined rows
+4. **Apply filters**: WHERE clause on joined result
+
+<Info>
+Joins materialize the full result before applying WHERE, ORDER BY, or LIMIT. For large tables, this may use significant memory.
+</Info>
+
+## Examples from Tests
+
+### INNER vs LEFT JOIN
+
+```sql test: select_left_join
+-- Same data set:
+-- INNER JOIN: 2 rows (excludes unmatched order)
+SELECT orders.id, users.name 
+FROM orders 
+INNER JOIN users ON orders.user_id = users.id;
+
+-- LEFT JOIN: 3 rows (includes unmatched order with NULL)
+SELECT orders.id, users.name 
+FROM orders 
+LEFT JOIN users ON orders.user_id = users.id;
+```
+
+### Join + GROUP BY + HAVING
+
+```sql test: select_join_group_by_having
+-- users: (1, 'alice'), (2, 'bob'), (3, 'carol')
+-- orders: (1, 1, 100), (2, 1, 200), (3, 2, 50), (4, 3, 75)
+
+SELECT users.name, SUM(orders.amount)
+FROM orders
+INNER JOIN users ON orders.user_id = users.id
+GROUP BY users.name
+HAVING SUM(orders.amount) >= 100;
+
+-- Result: alice (300) only
+-- bob (50) and carol (75) filtered by HAVING
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Aggregations" icon="calculator" href="/sql/aggregations">
+    Use COUNT, SUM, AVG with joins
+  </Card>
+  <Card title="Query Reference" icon="magnifying-glass" href="/sql/queries">
+    WHERE, ORDER BY, LIMIT
+  </Card>
+</CardGroup>

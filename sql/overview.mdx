@@ -1,0 +1,105 @@
+---
+title: SQL Overview
+description: SQL capabilities and PostgreSQL compatibility in Datacave
+---
+
+Datacave provides a comprehensive SQL interface built from the ground up in Rust. While it speaks the PostgreSQL wire protocol for client compatibility, the SQL layer and execution engine are entirely custom.
+
+## PostgreSQL Compatibility
+
+Datacave uses the **PostgreSQL wire protocol** for client connectivity, allowing you to use existing Postgres clients and tools:
+
+- `psql` command-line client
+- DBeaver, pgAdmin, and other GUI tools
+- PostgreSQL drivers in any language (Node.js, Python, Go, etc.)
+
+<Warning>
+Datacave implements the PostgreSQL **wire protocol only**. The SQL parsing, planning, and execution are Datacave-native. Not all PostgreSQL SQL features are supported.
+</Warning>
+
+## Supported SQL Features
+
+### Data Definition Language (DDL)
+
+- `CREATE TABLE` with basic column types
+- Primary key constraints
+- `DROP TABLE` (parser only; not fully implemented)
+
+### Data Manipulation Language (DML)
+
+- `INSERT` with values lists
+- `SELECT` with projections, filters, and joins
+- `UPDATE` with WHERE clauses
+- `DELETE` with WHERE clauses
+
+### Query Features
+
+- **WHERE clauses**: Column-literal comparisons (`=`, `!=`, `>`, `>=`, `<`, `<=`)
+- **Boolean logic**: `AND`, `OR` with parenthesized expressions
+- **Joins**: `INNER JOIN`, `LEFT JOIN` with multi-table support (3+ tables)
+- **Aggregations**: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`
+- **Grouping**: `GROUP BY` with `HAVING` clauses
+- **Ordering**: `ORDER BY` with `ASC`/`DESC`
+- **Pagination**: `LIMIT` and `OFFSET`
+
+### Transaction Commands
+
+- `BEGIN` / `START TRANSACTION`
+- `COMMIT`
+- `ROLLBACK`
+
+<Warning>
+Transaction commands are accepted and buffer statements, but **multi-statement atomicity and isolation are not guaranteed**.
+</Warning>
+
+## Data Types
+
+Datacave supports these column types:
+
+| Type | Description | Example |
+|------|-------------|--------|
+| `INT` | 32-bit integer | `42` |
+| `BIGINT` | 64-bit integer | `9223372036854775807` |
+| `FLOAT` | 64-bit floating point | `3.14` |
+| `TEXT` | Variable-length string | `'hello world'` |
+| `BOOLEAN` | True/false | `true`, `false` |
+
+## Unsupported Features
+
+The following SQL features are **not yet supported**:
+
+- Subqueries (`IN`, `EXISTS`, scalar)
+- `RIGHT JOIN`, `FULL OUTER JOIN`, `CROSS JOIN`
+- `CREATE INDEX` (planned)
+- `ALTER TABLE`
+- Window functions
+- CTEs (Common Table Expressions)
+- User-defined functions
+- Triggers and stored procedures
+- `GROUP BY ALL`
+
+## Wire Protocol Support
+
+Datacave implements both **Simple Query** and **Extended Query** protocols:
+
+- **Simple Query (`Q`)**: Execute SQL directly, supports multi-statement batches
+- **Extended Query**: `Parse`, `Bind`, `Describe`, `Execute`, `Sync` for prepared statements
+- **Authentication**: Cleartext password authentication
+- **Connection lifecycle**: Startup, authentication, ReadyForQuery states
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="DDL Reference" icon="database" href="/sql/ddl">
+    Create and drop tables
+  </Card>
+  <Card title="DML Reference" icon="pen-to-square" href="/sql/dml">
+    Insert, update, and delete data
+  </Card>
+  <Card title="Query Reference" icon="magnifying-glass" href="/sql/queries">
+    SELECT statements and filtering
+  </Card>
+  <Card title="Join Reference" icon="link" href="/sql/joins">
+    Multi-table queries
+  </Card>
+</CardGroup>

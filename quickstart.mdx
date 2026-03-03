@@ -1,80 +1,218 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quickstart
+description: Get Datacave running and execute your first query in under 5 minutes
 ---
 
-## Get started in three steps
+## Overview
 
-Get your documentation site running locally and make your first customization.
+This quickstart will guide you through running Datacave and executing your first SQL queries. You'll learn how to start the server, connect with a PostgreSQL client, and perform basic database operations.
 
-### Step 1: Set up your local environment
+<Note>
+  Datacave speaks the PostgreSQL wire protocol, so you can use any PostgreSQL client like `psql`, DBeaver, or language-specific drivers.
+</Note>
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
+## Prerequisites
+
+Before you begin, ensure you have:
+
+- Rust toolchain (stable) installed
+- A PostgreSQL-compatible client (`psql` recommended)
+- Git for cloning the repository
+
+<Tip>
+  Don't have Rust installed? Visit [rustup.rs](https://rustup.rs/) to install the Rust toolchain.
+</Tip>
+
+## Steps
+
+<Steps>
+  <Step title="Clone the repository">
+    Clone the Datacave repository to your local machine:
     
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
+    ```bash
+    git clone https://github.com/your-org/datacave.git
+    cd datacave
+    ```
+  </Step>
+  
+  <Step title="Start the server">
+    Run the Datacave server using the example configuration:
     
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
+    ```bash
+    cargo run -p datacave-server -- serve --config config.example.toml
+    ```
     
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+    You should see output indicating the server is listening:
+    
+    ```
+    Datacave server listening on 127.0.0.1:5433
+    Metrics endpoint available at 127.0.0.1:9898/metrics
+    ```
+    
+    <Warning>
+      The default configuration uses `password_plain = "change-me"` for the admin user. Change this before deploying to production!
+    </Warning>
+  </Step>
+  
+  <Step title="Connect with psql">
+    In a new terminal, connect to Datacave using `psql`:
+    
+    ```bash
+    psql "host=127.0.0.1 port=5433 user=admin dbname=default"
+    ```
+    
+    When prompted for a password, enter: `change-me`
+    
+    You should see the psql prompt:
+    
+    ```
+    psql (14.x, server datacave-0.1.0)
+    Type "help" for help.
+    
+    default=>
+    ```
+  </Step>
+  
+  <Step title="Create your first table">
+    Create a table to store user data:
+    
+    ```sql
+    CREATE TABLE users (
+      id BIGINT PRIMARY KEY,
+      username TEXT,
+      email TEXT,
+      active BOOLEAN
+    );
+    ```
+  </Step>
+  
+  <Step title="Insert data">
+    Insert some sample data:
+    
+    ```sql
+    INSERT INTO users (id, username, email, active) VALUES
+      (1, 'alice', 'alice@example.com', true),
+      (2, 'bob', 'bob@example.com', true),
+      (3, 'charlie', 'charlie@example.com', false);
+    ```
+  </Step>
+  
+  <Step title="Query your data">
+    Run queries to retrieve and analyze your data:
+    
+    <CodeGroup>
+    ```sql SELECT all users
+    SELECT * FROM users ORDER BY id;
+    ```
+    
+    ```sql Filter active users
+    SELECT username, email FROM users WHERE active = true;
+    ```
+    
+    ```sql Count users
+    SELECT COUNT(*) as total_users FROM users;
+    ```
+    
+    ```sql Aggregation
+    SELECT active, COUNT(*) as user_count 
+    FROM users 
+    GROUP BY active;
+    ```
+    </CodeGroup>
+  </Step>
+  
+  <Step title="Try a join">
+    Create a related table and perform a join:
+    
+    ```sql
+    CREATE TABLE orders (
+      order_id BIGINT PRIMARY KEY,
+      user_id BIGINT,
+      amount FLOAT,
+      status TEXT
+    );
+    
+    INSERT INTO orders (order_id, user_id, amount, status) VALUES
+      (100, 1, 49.99, 'completed'),
+      (101, 1, 29.99, 'completed'),
+      (102, 2, 99.99, 'pending');
+    
+    SELECT u.username, o.order_id, o.amount, o.status
+    FROM users u
+    INNER JOIN orders o ON u.id = o.user_id
+    ORDER BY o.order_id;
+    ```
+  </Step>
+  
+  <Step title="Use transactions">
+    Datacave supports transaction statements that buffer mutations until commit:
+    
+    ```sql
+    BEGIN;
+    
+    UPDATE users SET active = false WHERE id = 2;
+    INSERT INTO orders (order_id, user_id, amount, status) 
+    VALUES (103, 3, 19.99, 'pending');
+    
+    COMMIT;
+    ```
+    
+    <Note>
+      Transactions in Datacave buffer mutating statements until COMMIT. There is no guaranteed multi-statement atomicity or isolation in the current version.
+    </Note>
+  </Step>
+</Steps>
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+## Check server health
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+Datacave exposes observability endpoints for monitoring:
 
-### Step 3: Go live
+<CodeGroup>
+```bash Health check
+curl http://127.0.0.1:9898/health
+```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+```bash Readiness check
+curl http://127.0.0.1:9898/ready
+```
+
+```bash Prometheus metrics
+curl http://127.0.0.1:9898/metrics
+```
+</CodeGroup>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Configuration" icon="gear" href="/operations/configuration">
+    Learn how to configure storage, security, clustering, and more.
+  </Card>
+  
+  <Card title="SQL reference" icon="code" href="/sql/overview">
+    Explore the full SQL compatibility matrix and feature details.
+  </Card>
+  
+  <Card title="Installation" icon="download" href="/installation">
+    Set up Datacave for development or production deployment.
+  </Card>
+  
+  <Card title="Security" icon="shield" href="/guides/security">
+    Configure authentication, TLS, encryption, and audit logging.
+  </Card>
 </CardGroup>
 
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Connection refused error">
+    Ensure the server is running and listening on the correct port. Check that `listen_addr` in your config matches the host and port you're connecting to.
+  </Accordion>
+  
+  <Accordion title="Authentication failed">
+    Verify you're using the correct username and password. The default is `admin` / `change-me`. Check the `[[security.auth.users]]` section in your config file.
+  </Accordion>
+  
+  <Accordion title="Unsupported SQL feature">
+    Datacave supports a subset of PostgreSQL SQL. Check the [SQL compatibility matrix](/sql/compatibility) to see what's currently supported. Features like subqueries and indexes are planned for future releases.
+  </Accordion>
+</AccordionGroup>

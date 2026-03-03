@@ -1,0 +1,707 @@
+---
+title: Troubleshooting
+description: Common issues, debugging tips, log analysis, and solutions for Datacave operations
+---
+
+## Overview
+
+This guide covers common operational issues, debugging techniques, and solutions for Datacave deployments.
+
+## Server Issues
+
+<AccordionGroup>
+  <Accordion title="Server fails to start">
+    **Symptoms**:
+    - Process exits immediately
+    - Error messages in logs
+    - No response on configured port
+    
+    **Common causes and solutions**:
+    
+    **1. Configuration validation errors**
+    ```bash
+    # Check configuration syntax
+    datacave-server validate-config --config /etc/datacave/config.toml
+    ```
+    
+    Common validation errors:
+    - Missing encryption key when `encryption_enabled = true`
+    - Missing TLS cert/key paths when `tls.enabled = true`
+    - No users configured when `auth.enabled = true`
+    
+    **2. Port already in use**
+    ```bash
+    # Check if port is in use
+    lsof -i :5433
+    netstat -tulpn | grep 5433
+    
+    # Kill existing process or change port in config
+    ```
+    
+    **3. Data directory permissions**
+    ```bash
+    # Check permissions
+    ls -ld /var/lib/datacave/data
+    
+    # Fix permissions
+    chown -R datacave:datacave /var/lib/datacave/data
+    chmod 700 /var/lib/datacave/data
+    ```
+    
+    **4. Corrupted data files**
+    ```bash
+    # Check logs for corruption messages
+    journalctl -u datacave -n 100
+    
+    # Restore from backup if needed
+    ```
+  </Accordion>
+  
+  <Accordion title="Server becomes unresponsive">
+    **Symptoms**:
+    - Queries hang indefinitely
+    - Health check fails
+    - High CPU or memory usage
+    
+    **Debugging steps**:
+    
+    **1. Check resource usage**
+    ```bash
+    # CPU and memory
+    top -p $(pgrep datacave-server)
+    
+    # Detailed process info
+    ps aux | grep datacave-server
+    
+    # I/O wait
+    iostat -x 1
+    ```
+    
+    **2. Check for deadlocks**
+    ```bash
+    # Send SIGINFO to dump stack traces (if supported)
+    kill -SIGINFO $(pgrep datacave-server)
+    
+    # Check logs for stack traces
+    journalctl -u datacave -f
+    ```
+    
+    **3. Analyze query load**
+    ```bash
+    # Check active connections
+    curl http://127.0.0.1:9898/metrics | grep datacave_connections_active
+    
+    # Check query rate
+    curl http://127.0.0.1:9898/metrics | grep datacave_queries_total
+    ```
+    
+    **Solutions**:
+    - Increase `max_connections` if connection limit reached
+    - Kill long-running queries (if supported)
+    - Restart server as last resort
+    - Add more resources (CPU, memory)
+  </Accordion>
+  
+  <Accordion title="Server crashes randomly">
+    **Symptoms**:
+    - Process terminates unexpectedly
+    - Core dumps generated
+    - OOM (Out of Memory) killer messages
+    
+    **Debugging steps**:
+    
+    **1. Check system logs**
+    ```bash
+    # Kernel logs for OOM killer
+    dmesg | grep -i "out of memory"
+    dmesg | grep -i "killed process"
+    
+    # System journal
+    journalctl -xe | grep datacave
+    ```
+    
+    **2. Analyze core dump (if available)**
+    ```bash
+    # Enable core dumps
+    ulimit -c unlimited
+    
+    # Analyze with gdb (if Rust symbols available)
+    gdb datacave-server core.12345
+    ```
+    
+    **3. Check memory usage**
+    ```bash
+    # Monitor memory over time
+    watch -n 1 'ps aux | grep datacave-server'
+    
+    # Check for memory leaks
+    valgrind --leak-check=full datacave-server serve --config config.toml
+    ```
+    
+    **Solutions**:
+    - Reduce `memtable_max_bytes` to lower memory usage
+    - Decrease `max_connections`
+    - Add more RAM to system
+    - Use swap as temporary mitigation
+  </Accordion>
+</AccordionGroup>
+
+## Connection Issues
+
+<AccordionGroup>
+  <Accordion title="Cannot connect to server">
+    **Symptoms**:
+    - Connection refused
+    - Connection timeout
+    - Authentication errors
+    
+    **Debugging steps**:
+    
+    **1. Verify server is running**
+    ```bash
+    # Check process
+    ps aux | grep datacave-server
+    
+    # Check listening ports
+    netstat -tulpn | grep 5433
+    lsof -i :5433
+    ```
+    
+    **2. Test network connectivity**
+    ```bash
+    # From client machine
+    telnet 127.0.0.1 5433
+    nc -zv 127.0.0.1 5433
+    
+    # Check firewall rules
+    iptables -L -n | grep 5433
+    ufw status | grep 5433
+    ```
+    
+    **3. Verify listen address**
+    ```toml
+    # config.toml
+    [server]
+    listen_addr = "0.0.0.0:5433"  # Listen on all interfaces
+    # Not: "127.0.0.1:5433" (localhost only)
+    ```
+    
+    **4. Check authentication**
+    ```bash
+    # Test with correct credentials
+    psql "host=127.0.0.1 port=5433 user=admin password=change-me dbname=default"
+    
+    # Check auth logs
+    journalctl -u datacave | grep -i auth
+    ```
+  </Accordion>
+  
+  <Accordion title="Connection pool exhausted">
+    **Symptoms**:
+    - "too many connections" error
+    - New connections rejected
+    - High active connection count
+    
+    **Solutions**:
+    
+    **1. Increase max_connections**
+    ```toml
+    [server]
+    max_connections = 2048  # Increase from 1024
+    ```
+    
+    **2. Implement connection pooling**
+    ```python
+    # Python example with psycopg2
+    from psycopg2 import pool
+    
+    connection_pool = pool.SimpleConnectionPool(
+        minconn=1,
+        maxconn=20,  # Limit per application instance
+        host="127.0.0.1",
+        port=5433,
+        user="admin",
+        password="change-me",
+        database="default"
+    )
+    ```
+    
+    **3. Reduce idle_timeout**
+    ```toml
+    [server]
+    idle_timeout_secs = 60  # Close idle connections faster
+    ```
+    
+    **4. Find connection leaks**
+    ```bash
+    # Monitor active connections
+    watch -n 1 'curl -s http://127.0.0.1:9898/metrics | grep datacave_connections_active'
+    
+    # Check application for unclosed connections
+    ```
+  </Accordion>
+  
+  <Accordion title="TLS connection failures">
+    **Symptoms**:
+    - SSL handshake errors
+    - Certificate verification failures
+    
+    **Debugging steps**:
+    
+    **1. Verify certificate**
+    ```bash
+    # Check certificate validity
+    openssl x509 -in /etc/datacave/certs/server.crt -text -noout
+    
+    # Verify certificate and key match
+    openssl x509 -noout -modulus -in /etc/datacave/certs/server.crt | openssl md5
+    openssl rsa -noout -modulus -in /etc/datacave/certs/server.key | openssl md5
+    ```
+    
+    **2. Test TLS connection**
+    ```bash
+    # Test with OpenSSL
+    openssl s_client -connect 127.0.0.1:5433 -showcerts
+    
+    # Test with psql
+    psql "host=127.0.0.1 port=5433 user=admin dbname=default sslmode=require"
+    ```
+    
+    **3. Check configuration**
+    ```toml
+    [security.tls]
+    enabled = true
+    cert_path = "/etc/datacave/certs/server.crt"  # Correct path
+    key_path = "/etc/datacave/certs/server.key"   # Correct path
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Query Performance Issues
+
+<AccordionGroup>
+  <Accordion title="Slow queries">
+    **Symptoms**:
+    - High query latency
+    - Queries taking longer than expected
+    
+    **Debugging steps**:
+    
+    **1. Check query metrics**
+    ```bash
+    # Query latency distribution
+    curl -s http://127.0.0.1:9898/metrics | grep query_duration_seconds
+    ```
+    
+    **2. Analyze storage metrics**
+    ```bash
+    # SSTable count (high count = read amplification)
+    curl -s http://127.0.0.1:9898/metrics | grep sstable_count
+    
+    # Memtable size
+    curl -s http://127.0.0.1:9898/metrics | grep memtable_bytes
+    ```
+    
+    **3. Check disk I/O**
+    ```bash
+    # I/O wait time
+    iostat -x 1
+    
+    # Disk latency
+    iotop -o
+    ```
+    
+    **Solutions**:
+    - Increase compaction frequency to reduce SSTable count
+    - Upgrade to SSD for lower read latency
+    - Add indexes (when available)
+    - Optimize query (avoid full table scans)
+  </Accordion>
+  
+  <Accordion title="High write latency">
+    **Symptoms**:
+    - INSERT/UPDATE queries slow
+    - Memtable flush delays
+    
+    **Debugging steps**:
+    
+    **1. Check memtable status**
+    ```bash
+    # Current memtable size
+    curl -s http://127.0.0.1:9898/metrics | grep memtable_bytes
+    ```
+    
+    **2. Monitor compaction**
+    ```bash
+    # Compaction duration
+    curl -s http://127.0.0.1:9898/metrics | grep compaction_duration_seconds
+    ```
+    
+    **Solutions**:
+    - Increase `memtable_max_bytes` to batch writes
+    - Reduce `compaction_interval_secs` if compaction is falling behind
+    - Use faster storage (NVMe SSD)
+    - Batch INSERT statements in transactions
+  </Accordion>
+</AccordionGroup>
+
+## Storage Issues
+
+<AccordionGroup>
+  <Accordion title="Disk space exhausted">
+    **Symptoms**:
+    - "No space left on device" errors
+    - Write operations fail
+    
+    **Debugging steps**:
+    
+    **1. Check disk usage**
+    ```bash
+    df -h /var/lib/datacave/data
+    du -sh /var/lib/datacave/data/*
+    ```
+    
+    **2. Identify large files**
+    ```bash
+    # Find largest files
+    find /var/lib/datacave/data -type f -exec du -h {} + | sort -rh | head -20
+    ```
+    
+    **Solutions**:
+    - Manual compaction: `datacave-server compact --data-dir /var/lib/datacave/data`
+    - Delete old WAL files (after checkpoint)
+    - Increase disk size
+    - Implement data retention policy
+  </Accordion>
+  
+  <Accordion title="Too many SSTable files">
+    **Symptoms**:
+    - SSTable count > 50
+    - Increasing read latency
+    - Slow query performance
+    
+    **Debugging steps**:
+    
+    **1. Check SSTable count per shard**
+    ```bash
+    curl -s http://127.0.0.1:9898/metrics | grep sstable_count
+    
+    # Or check filesystem
+    ls /var/lib/datacave/data/sstables/shard-0/ | wc -l
+    ```
+    
+    **2. Check compaction status**
+    ```bash
+    # Compaction rate
+    curl -s http://127.0.0.1:9898/metrics | grep compaction_total
+    ```
+    
+    **Solutions**:
+    - Decrease `compaction_interval_secs` to compact more frequently
+    - Manual compaction: `datacave-server compact --shard 0`
+    - Increase `sstable_target_bytes` to create fewer, larger files
+  </Accordion>
+  
+  <Accordion title="WAL corruption">
+    **Symptoms**:
+    - Server fails to start with WAL error
+    - "WAL segment corrupted" in logs
+    
+    **Recovery steps**:
+    
+    **1. Attempt recovery**
+    ```bash
+    # Try automatic recovery
+    datacave-server recover --data-dir /var/lib/datacave/data
+    ```
+    
+    **2. Skip corrupted segment (data loss)**
+    ```bash
+    # Skip errors and continue (DANGER: data loss)
+    datacave-server recover --data-dir /var/lib/datacave/data --skip-wal-errors
+    ```
+    
+    **3. Restore from backup**
+    ```bash
+    # Stop server
+    systemctl stop datacave
+    
+    # Restore last good backup
+    rm -rf /var/lib/datacave/data
+    cp -r /backups/datacave-latest /var/lib/datacave/data
+    
+    # Restart
+    systemctl start datacave
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Cluster Issues
+
+<AccordionGroup>
+  <Accordion title="Replica lag increasing">
+    **Symptoms**:
+    - Replication lag > 30 seconds
+    - Replica falling behind primary
+    
+    **Debugging steps**:
+    
+    **1. Check replication lag**
+    ```bash
+    curl -s http://127.0.0.1:9898/metrics | grep replication_lag_seconds
+    ```
+    
+    **2. Check network bandwidth**
+    ```bash
+    # Monitor network usage
+    iftop -i eth0
+    
+    # Check network latency to replica
+    ping replica-host
+    ```
+    
+    **3. Check replica disk I/O**
+    ```bash
+    # On replica node
+    iostat -x 1
+    ```
+    
+    **Solutions**:
+    - Increase network bandwidth
+    - Upgrade replica storage to SSD
+    - Reduce write rate on primary
+    - Add more replicas to distribute load
+  </Accordion>
+  
+  <Accordion title="Split-brain scenario">
+    **Symptoms**:
+    - Multiple primaries for same shard
+    - Inconsistent data across nodes
+    
+    **Resolution**:
+    
+    **1. Identify primaries**
+    ```bash
+    # Check cluster status on each node
+    curl http://node1:9898/cluster/status
+    curl http://node2:9898/cluster/status
+    curl http://node3:9898/cluster/status
+    ```
+    
+    **2. Choose canonical primary**
+    - Select node with most recent data
+    - Or node with lowest replication lag
+    
+    **3. Demote other primaries**
+    ```bash
+    # Demote incorrect primary
+    datacave-server cluster demote --shard 0 --node-id node2
+    ```
+    
+    **4. Resync replicas**
+    ```bash
+    # Force resync from canonical primary
+    datacave-server cluster resync --shard 0 --source node1
+    ```
+  </Accordion>
+  
+  <Accordion title="Node not joining cluster">
+    **Symptoms**:
+    - New node fails to join
+    - Cluster membership errors
+    
+    **Debugging steps**:
+    
+    **1. Check network connectivity**
+    ```bash
+    # From new node, test connectivity to existing nodes
+    nc -zv node1 5433
+    nc -zv node2 5433
+    ```
+    
+    **2. Verify configuration**
+    ```bash
+    # Ensure shard_count matches across all nodes
+    grep shard_count /etc/datacave/config.toml
+    ```
+    
+    **3. Check clock synchronization**
+    ```bash
+    # Verify time is synchronized (use NTP)
+    timedatectl status
+    ntpq -p
+    ```
+    
+    **Solutions**:
+    - Fix firewall rules to allow cluster communication
+    - Ensure consistent configuration across nodes
+    - Synchronize clocks with NTP
+  </Accordion>
+</AccordionGroup>
+
+## Logging and Diagnostics
+
+### Log Levels
+
+Adjust log verbosity for debugging:
+
+```bash
+# Info level (default)
+RUST_LOG=info datacave-server serve --config config.toml
+
+# Debug level (verbose)
+RUST_LOG=debug datacave-server serve --config config.toml
+
+# Module-specific logging
+RUST_LOG=datacave_lsm=debug,datacave_sql=info datacave-server serve --config config.toml
+
+# Trace level (very verbose, includes all details)
+RUST_LOG=trace datacave-server serve --config config.toml
+```
+
+### Log Analysis
+
+```bash
+# Filter by error level
+journalctl -u datacave | grep -i error
+
+# Show last 100 lines
+journalctl -u datacave -n 100
+
+# Follow logs in real-time
+journalctl -u datacave -f
+
+# Filter by time range
+journalctl -u datacave --since "2026-03-03 10:00:00" --until "2026-03-03 11:00:00"
+
+# Export to file
+journalctl -u datacave > datacave-logs.txt
+```
+
+### Diagnostic Commands
+
+```bash
+# Server status
+systemctl status datacave
+
+# Configuration validation
+datacave-server validate-config --config /etc/datacave/config.toml
+
+# Health check
+curl http://127.0.0.1:9898/health
+
+# Readiness check
+curl http://127.0.0.1:9898/ready
+
+# Metrics dump
+curl http://127.0.0.1:9898/metrics > metrics.txt
+
+# Process information
+ps aux | grep datacave-server
+lsof -p $(pgrep datacave-server)
+```
+
+## Getting Help
+
+### Before Requesting Support
+
+<Steps>
+  <Step title="Gather Information">
+    Collect:
+    - Datacave version: `datacave-server --version`
+    - Configuration file (redact sensitive values)
+    - Recent logs: `journalctl -u datacave -n 500 > logs.txt`
+    - Metrics snapshot: `curl http://127.0.0.1:9898/metrics > metrics.txt`
+  </Step>
+  
+  <Step title="Reproduce Issue">
+    - Document exact steps to reproduce
+    - Note any error messages
+    - Capture timestamps
+  </Step>
+  
+  <Step title="Check Documentation">
+    Review:
+    - This troubleshooting guide
+    - Configuration reference: `/operations/configuration`
+    - Performance tuning: `/operations/performance`
+  </Step>
+  
+  <Step title="Search Existing Issues">
+    Check GitHub issues:
+    - https://github.com/yourusername/datacave/issues
+  </Step>
+</Steps>
+
+### Filing a Bug Report
+
+Include:
+
+```markdown
+**Datacave version**: x.y.z
+**OS**: Ubuntu 22.04 LTS
+**Deployment**: Docker / Systemd / Kubernetes
+
+**Problem**: Brief description
+
+**Steps to reproduce**:
+1. Start server with config X
+2. Run query Y
+3. Observe error Z
+
+**Expected behavior**: What should happen
+
+**Actual behavior**: What actually happens
+
+**Logs**: (attach logs.txt)
+
+**Configuration**: (attach config.toml, redact secrets)
+
+**Metrics**: (attach metrics.txt if relevant)
+```
+
+## Preventive Measures
+
+<CardGroup cols={2}>
+  <Card title="Monitoring" icon="chart-line">
+    - Set up alerts for key metrics
+    - Monitor disk space, SSTable count, query latency
+    - Use Grafana dashboards for visualization
+  </Card>
+  
+  <Card title="Regular Maintenance" icon="wrench">
+    - Test backups monthly
+    - Review slow query logs
+    - Update to latest stable version
+    - Monitor changelog for bug fixes
+  </Card>
+  
+  <Card title="Capacity Planning" icon="server">
+    - Plan for 50% headroom
+    - Monitor growth trends
+    - Scale before hitting limits
+  </Card>
+  
+  <Card title="Documentation" icon="book">
+    - Maintain runbooks for common issues
+    - Document configuration changes
+    - Keep contact information updated
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Set up comprehensive monitoring
+  </Card>
+  <Card title="Performance Tuning" icon="gauge" href="/operations/performance">
+    Optimize for your workload
+  </Card>
+  <Card title="Backup & Recovery" icon="database" href="/operations/backup-recovery">
+    Implement backup strategy
+  </Card>
+  <Card title="Clustering" icon="server" href="/operations/clustering">
+    Configure high availability
+  </Card>
+</CardGroup>

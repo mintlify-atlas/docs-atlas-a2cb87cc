@@ -1,0 +1,281 @@
+---
+title: datacave-lsm
+description: LSM storage engine API with MemTable, SSTable, WAL, and compaction support
+---
+
+# datacave-lsm
+
+The `datacave-lsm` crate implements a Log-Structured Merge-tree (LSM) storage engine with write-ahead logging, encryption, and compaction.
+
+## Module Structure
+
+Located at `crates/datacave-lsm/src/`:
+
+- **lib.rs:1-12** - Public exports
+- **engine.rs** - Main LSM engine
+- **memtable.rs** - In-memory write buffer
+- **sstable.rs** - Sorted String Table files
+- **wal.rs** - Write-ahead log
+- **compaction.rs** - SSTable compaction
+- **encryption.rs** - Data encryption
+
+## LsmEngine
+
+The main storage engine providing versioned key-value operations.
+
+**Source:** `crates/datacave-lsm/src/engine.rs:20-160`
+
+### LsmOptions
+
+Configuration for the LSM engine.
+
+```rust
+pub struct LsmOptions {
+    pub data_dir: String,
+    pub wal_path: String,
+    pub memtable_max_bytes: usize,
+    pub encryption_key: Option<Vec<u8>>,
+    pub wal_enabled: bool,
+}
+```
+
+### LsmEngine API
+
+```rust
+pub struct LsmEngine {
+    memtable: Mutex<MemTable>,
+    wal: Mutex<Wal>,
+    sstables: Mutex<Vec<SSTable>>,
+    options: LsmOptions,
+    encryptor: Option<DataEncryptor>,
+}
+
+impl LsmEngine {
+    pub async fn open(options: LsmOptions) -> Result<Self>
+    
+    pub async fn put(&self, key: &[u8], value: &[u8], version: Version) 
+        -> Result<()>
+    
+    pub async fn delete(&self, key: &[u8], version: Version) 
+        -> Result<()>
+    
+    pub async fn get(&self, key: &[u8], snapshot: Version) 
+        -> Result<Option<Vec<u8>>>
+    
+    pub async fn flush(&self) -> Result<()>
+    
+    pub async fn compact(&self) -> Result<()>
+}
+```
+
+**Key Functions:**
+
+#### open
+
+**Source:** `crates/datacave-lsm/src/engine.rs:30-65`
+
+Opens or creates an LSM engine at the specified path. Replays WAL if enabled and loads existing SSTables.
+
+```rust
+let options = LsmOptions {
+    data_dir: "/data/db".to_string(),
+    wal_path: "/data/wal.log".to_string(),
+    memtable_max_bytes: 4 * 1024 * 1024, // 4MB
+    encryption_key: None,
+    wal_enabled: true,
+};
+let engine = LsmEngine::open(options).await?;
+```
+
+#### put
+
+**Source:** `crates/datacave-lsm/src/engine.rs:67-86`
+
+Writes a versioned key-value pair. Triggers flush when memtable exceeds max size.
+
+```rust
+let version = mvcc.next_version();
+engine.put(b"user:123", b"alice", version).await?;
+```
+
+#### get
+
+**Source:** `crates/datacave-lsm/src/engine.rs:106-123`
+
+Retrieves the latest value for a key at or before the snapshot version. Searches memtable first, then SSTables in reverse order.
+
+```rust
+let snapshot = mvcc.snapshot();
+if let Some(value) = engine.get(b"user:123", snapshot.version).await? {
+    println!("Found: {:?}", value);
+}
+```
+
+#### flush
+
+**Source:** `crates/datacave-lsm/src/engine.rs:125-146`
+
+Flushes memtable to a new SSTable file and resets WAL.
+
+#### compact
+
+**Source:** `crates/datacave-lsm/src/engine.rs:148-159`
+
+Compacts all SSTables into a single file, removing duplicates and tombstones.
+
+## MemTable
+
+In-memory write buffer backed by a BTreeMap.
+
+**Source:** `crates/datacave-lsm/src/memtable.rs:3-49`
+
+```rust
+pub struct MemTable {
+    entries: BTreeMap<Vec<u8>, Vec<u8>>,
+    bytes: usize,
+}
+
+impl MemTable {
+    pub fn new() -> Self
+    
+    pub fn put(&mut self, key: Vec<u8>, value: Vec<u8>)
+    
+    pub fn get(&self, key: &[u8]) -> Option<&Vec<u8>>
+    
+    pub fn range_up_to<'a>(&'a self, upper: Vec<u8>) 
+        -> impl DoubleEndedIterator<Item = (&'a Vec<u8>, &'a Vec<u8>)>
+    
+    pub fn iter(&self) -> impl Iterator<Item = (&Vec<u8>, &Vec<u8>)>
+    
+    pub fn clear(&mut self)
+    
+    pub fn approximate_bytes(&self) -> usize
+}
+```
+
+MemTable stores entries in sorted order and tracks approximate memory usage.
+
+## SSTable
+
+Sorted String Table: immutable on-disk sorted key-value file.
+
+**Source:** `crates/datacave-lsm/src/sstable.rs:6-99`
+
+```rust
+pub struct SstEntry {
+    pub key: Vec<u8>,
+    pub value: Vec<u8>,
+}
+
+pub struct SSTable {
+    pub path: String,
+}
+
+impl SSTable {
+    pub fn new(path: String) -> Self
+    
+    pub async fn write(path: &str, entries: &[SstEntry]) 
+        -> Result<()>
+    
+    pub async fn write_with(
+        path: &str, 
+        entries: &[SstEntry],
+        encryptor: Option<&DataEncryptor>
+    ) -> Result<()>
+    
+    pub async fn load(&self) -> Result<Vec<SstEntry>>
+    
+    pub async fn load_with(
+        &self,
+        encryptor: Option<&DataEncryptor>
+    ) -> Result<Vec<SstEntry>>
+}
+```
+
+**File Format:**
+
+Each entry is encoded as:
+```
+[key_len: u32][key: bytes][value_len: u32][value: bytes]
+```
+
+Optionally encrypted using AES-GCM.
+
+## WAL (Write-Ahead Log)
+
+Persistent log for crash recovery.
+
+**Source:** `crates/datacave-lsm/src/wal.rs:6-91`
+
+```rust
+pub enum WalOp {
+    Put,
+    Delete,
+}
+
+pub struct Wal {
+    file: File,
+    encryptor: Option<DataEncryptor>,
+}
+
+impl Wal {
+    pub async fn open(path: &str, encryptor: Option<DataEncryptor>) 
+        -> Result<Self>
+    
+    pub async fn append(&mut self, op: WalOp, key: &[u8], value: &[u8]) 
+        -> Result<()>
+    
+    pub async fn reset(&mut self) -> Result<()>
+    
+    pub async fn replay(
+        path: &str,
+        encryptor: Option<DataEncryptor>
+    ) -> Result<Vec<(WalOp, Vec<u8>, Vec<u8>)>>
+}
+```
+
+**Record Format:**
+
+```
+[record_len: u32][op: u8][key_len: u32][key: bytes][value_len: u32][value: bytes]
+```
+
+## Compaction
+
+Merges multiple SSTables into one, preserving latest versions.
+
+**Source:** `crates/datacave-lsm/src/compaction.rs:6-23`
+
+```rust
+pub async fn compact_tables(
+    output_path: &str,
+    tables: &[SSTable],
+    encryptor: Option<&DataEncryptor>,
+) -> Result<()>
+```
+
+Loads all entries from input tables, merges by key (keeping latest), and writes to a new SSTable.
+
+## Metrics
+
+The engine emits metrics for monitoring:
+
+- `lsm_put` - Put operations (engine.rs:68)
+- `lsm_delete` - Delete operations (engine.rs:89)
+- `lsm_get` - Get operations (engine.rs:107)
+- `lsm_flush_total` - Flush operations (engine.rs:130)
+- `lsm_compact_total` - Compaction operations (engine.rs:153)
+
+## Dependencies
+
+```toml
+anyhow = "1"
+bytes = "1"
+serde = { version = "1", features = ["derive"] }
+datacave-core = { path = "../datacave-core" }
+tokio = { version = "1", features = ["fs", "io-util", "sync"] }
+tracing = "0.1"
+aes-gcm = "0.10"
+rand = "0.8"
+metrics = "0.22"
+```

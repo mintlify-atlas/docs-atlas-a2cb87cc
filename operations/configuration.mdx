@@ -1,0 +1,408 @@
+---
+title: Configuration
+description: Complete configuration reference for Datacave with all available options and settings
+---
+
+## Configuration File
+
+Datacave uses TOML format for configuration. By default, the server looks for `config.toml` in the working directory, or you can specify a custom path:
+
+```bash
+datacave-server serve --config /path/to/config.toml
+```
+
+## Complete Configuration Reference
+
+### Server Configuration
+
+Controls the main database server behavior.
+
+```toml
+[server]
+listen_addr = "127.0.0.1:5433"
+max_connections = 1024
+idle_timeout_secs = 300
+```
+
+<ParamField path="server.listen_addr" type="string" default="127.0.0.1:5433">
+  The address and port the database server listens on. Use `0.0.0.0:5433` to listen on all interfaces.
+</ParamField>
+
+<ParamField path="server.max_connections" type="integer" default="1024">
+  Maximum number of concurrent client connections. Adjust based on your workload and system resources.
+</ParamField>
+
+<ParamField path="server.idle_timeout_secs" type="integer" default="300">
+  Idle connection timeout in seconds. Connections inactive for this duration will be closed. Set to `0` to disable.
+</ParamField>
+
+### Storage Configuration
+
+Configures the LSM-based storage engine.
+
+```toml
+[storage]
+data_dir = "./data"
+wal_enabled = true
+memtable_max_bytes = 67108864
+sstable_target_bytes = 134217728
+encryption_enabled = false
+encryption_key_base64 = "REPLACE_WITH_BASE64_32_BYTES"
+compaction_interval_secs = 300
+```
+
+<ParamField path="storage.data_dir" type="string" default="./data">
+  Directory where database files (WAL, SSTables, metadata) are stored. Ensure sufficient disk space and use SSD for best performance.
+</ParamField>
+
+<ParamField path="storage.wal_enabled" type="boolean" default="true">
+  Enable Write-Ahead Log (WAL) for durability. **Strongly recommended** for production. Disable only for ephemeral testing.
+</ParamField>
+
+<ParamField path="storage.memtable_max_bytes" type="integer" default="67108864">
+  Maximum size of in-memory memtable in bytes (default: 64 MB). When exceeded, memtable is flushed to disk as an SSTable.
+  
+  **Tuning**: Increase for write-heavy workloads to reduce flush frequency. Decrease to limit memory usage.
+</ParamField>
+
+<ParamField path="storage.sstable_target_bytes" type="integer" default="134217728">
+  Target size for SSTable files in bytes (default: 128 MB). Compaction aims to create SSTables close to this size.
+  
+  **Tuning**: Larger values reduce the number of files but increase compaction cost. Smaller values improve compaction speed but increase file count.
+</ParamField>
+
+<ParamField path="storage.encryption_enabled" type="boolean" default="false">
+  Enable encryption at rest for WAL and SSTable files. Requires `encryption_key_base64` to be set.
+</ParamField>
+
+<ParamField path="storage.encryption_key_base64" type="string">
+  Base64-encoded 32-byte encryption key. Required when `encryption_enabled = true`. Generate with:
+  ```bash
+  openssl rand -base64 32
+  ```
+  
+  <Warning>Store this key securely (e.g., in a secrets manager). Loss of the key means permanent data loss.</Warning>
+</ParamField>
+
+<ParamField path="storage.compaction_interval_secs" type="integer" default="300">
+  Interval in seconds between automatic compaction runs (default: 5 minutes). Compaction merges SSTables to reduce read amplification.
+  
+  **Tuning**: Decrease for write-heavy workloads to prevent file accumulation. Increase to reduce background I/O.
+</ParamField>
+
+### Sharding Configuration
+
+Controls data partitioning across shards.
+
+```toml
+[sharding]
+shard_count = 4
+```
+
+<ParamField path="sharding.shard_count" type="integer" default="4">
+  Number of shards for data partitioning. Data is distributed across shards using consistent hashing on the primary key.
+  
+  **Planning**: Choose based on dataset size and parallelism needs. Common values: 4, 8, 16, 32. Cannot be changed after initialization without migration.
+</ParamField>
+
+### Cluster Configuration
+
+Configures replication for high availability.
+
+```toml
+[cluster]
+replication_factor = 3
+```
+
+<ParamField path="cluster.replication_factor" type="integer" default="3">
+  Number of replicas for each data shard. A factor of 3 means each shard has 2 additional copies.
+  
+  **Recommendations**:
+  - `1`: No replication (single node, no failover)
+  - `3`: Standard production setup (tolerates 1 node failure)
+  - `5`: High availability (tolerates 2 node failures)
+</ParamField>
+
+### Metrics Configuration
+
+Configures the metrics and observability endpoint.
+
+```toml
+[metrics]
+listen_addr = "127.0.0.1:9898"
+```
+
+<ParamField path="metrics.listen_addr" type="string" default="127.0.0.1:9898">
+  Address and port for the metrics HTTP endpoint. Exposes:
+  - `GET /metrics`: Prometheus-compatible metrics
+  - `GET /health`: Health check endpoint
+  - `GET /ready`: Readiness probe
+  
+  Use `0.0.0.0:9898` to expose metrics externally (ensure firewall rules are appropriate).
+</ParamField>
+
+### Security Configuration
+
+#### TLS Settings
+
+Enable TLS encryption for client connections.
+
+```toml
+[security.tls]
+enabled = false
+cert_path = "./certs/server.crt"
+key_path = "./certs/server.key"
+```
+
+<ParamField path="security.tls.enabled" type="boolean" default="false">
+  Enable TLS for encrypted client connections. When enabled, `cert_path` and `key_path` are required.
+</ParamField>
+
+<ParamField path="security.tls.cert_path" type="string">
+  Path to the TLS certificate file (PEM format). Required when TLS is enabled.
+</ParamField>
+
+<ParamField path="security.tls.key_path" type="string">
+  Path to the TLS private key file (PEM format). Required when TLS is enabled.
+</ParamField>
+
+#### Authentication Settings
+
+Configure user authentication and authorization.
+
+```toml
+[security.auth]
+enabled = true
+```
+
+<ParamField path="security.auth.enabled" type="boolean" default="true">
+  Enable authentication for client connections. When enabled, at least one user must be configured.
+</ParamField>
+
+#### Role Definitions
+
+Define roles with specific permissions.
+
+```toml
+[[security.auth.roles]]
+name = "reader"
+can_read = true
+can_write = false
+is_admin = false
+
+[[security.auth.roles]]
+name = "writer"
+can_read = true
+can_write = true
+is_admin = false
+
+[[security.auth.roles]]
+name = "admin"
+can_read = true
+can_write = true
+is_admin = true
+```
+
+<ParamField path="security.auth.roles[].name" type="string">
+  Unique role name referenced by user configurations.
+</ParamField>
+
+<ParamField path="security.auth.roles[].can_read" type="boolean">
+  Allow `SELECT` queries and read operations.
+</ParamField>
+
+<ParamField path="security.auth.roles[].can_write" type="boolean">
+  Allow `INSERT`, `UPDATE`, `DELETE`, and DDL operations.
+</ParamField>
+
+<ParamField path="security.auth.roles[].is_admin" type="boolean">
+  Grant administrative privileges (role/user management, system operations).
+</ParamField>
+
+#### User Definitions
+
+Define users and assign roles.
+
+```toml
+[[security.auth.users]]
+username = "admin"
+password_plain = "change-me"
+roles = ["admin"]
+```
+
+<ParamField path="security.auth.users[].username" type="string">
+  Unique username for authentication.
+</ParamField>
+
+<ParamField path="security.auth.users[].password_plain" type="string">
+  Plain text password. **Not recommended for production**. Use `password_hash` instead.
+</ParamField>
+
+<ParamField path="security.auth.users[].password_hash" type="string">
+  Hashed password. Generate using:
+  ```bash
+  datacave-server gen-password-hash --password "your-password"
+  ```
+</ParamField>
+
+<ParamField path="security.auth.users[].roles" type="array">
+  List of role names assigned to this user. User inherits all permissions from assigned roles.
+</ParamField>
+
+#### Audit Logging
+
+Enable audit logging for compliance and security monitoring.
+
+```toml
+[security.audit]
+enabled = true
+```
+
+<ParamField path="security.audit.enabled" type="boolean" default="true">
+  Enable audit logging of authentication events, queries, and administrative actions.
+</ParamField>
+
+## Example Configurations
+
+### Development Configuration
+
+```toml
+[server]
+listen_addr = "127.0.0.1:5433"
+max_connections = 100
+idle_timeout_secs = 60
+
+[storage]
+data_dir = "./data"
+wal_enabled = true
+memtable_max_bytes = 33554432  # 32 MB
+sstable_target_bytes = 67108864  # 64 MB
+encryption_enabled = false
+compaction_interval_secs = 600
+
+[sharding]
+shard_count = 2
+
+[cluster]
+replication_factor = 1
+
+[metrics]
+listen_addr = "127.0.0.1:9898"
+
+[security.tls]
+enabled = false
+
+[security.auth]
+enabled = false
+
+[security.audit]
+enabled = false
+```
+
+### Production Configuration
+
+```toml
+[server]
+listen_addr = "0.0.0.0:5433"
+max_connections = 2048
+idle_timeout_secs = 300
+
+[storage]
+data_dir = "/var/lib/datacave/data"
+wal_enabled = true
+memtable_max_bytes = 134217728  # 128 MB
+sstable_target_bytes = 268435456  # 256 MB
+encryption_enabled = true
+encryption_key_base64 = "YOUR_BASE64_KEY_HERE"
+compaction_interval_secs = 300
+
+[sharding]
+shard_count = 16
+
+[cluster]
+replication_factor = 3
+
+[metrics]
+listen_addr = "0.0.0.0:9898"
+
+[security.tls]
+enabled = true
+cert_path = "/etc/datacave/certs/server.crt"
+key_path = "/etc/datacave/certs/server.key"
+
+[security.auth]
+enabled = true
+
+[[security.auth.roles]]
+name = "admin"
+can_read = true
+can_write = true
+is_admin = true
+
+[[security.auth.users]]
+username = "admin"
+password_hash = "$HASHED_PASSWORD"
+roles = ["admin"]
+
+[security.audit]
+enabled = true
+```
+
+## Configuration Validation
+
+Datacave validates configuration on startup. Common validation errors:
+
+<AccordionGroup>
+  <Accordion title="storage encryption enabled but key missing">
+    When `encryption_enabled = true`, you must provide `encryption_key_base64`.
+    
+    ```bash
+    openssl rand -base64 32
+    ```
+  </Accordion>
+  
+  <Accordion title="tls enabled but cert_path or key_path missing">
+    When `security.tls.enabled = true`, both `cert_path` and `key_path` must be provided.
+  </Accordion>
+  
+  <Accordion title="auth enabled but no users configured">
+    When `security.auth.enabled = true`, at least one user must be defined in `security.auth.users`.
+  </Accordion>
+  
+  <Accordion title="user has no password configured">
+    Each user must have either `password_plain` or `password_hash` set.
+  </Accordion>
+  
+  <Accordion title="user has no roles configured">
+    Each user must have at least one role assigned in the `roles` array.
+  </Accordion>
+</AccordionGroup>
+
+## Environment Variables
+
+Configuration values can be overridden using environment variables (if supported by your deployment):
+
+```bash
+DATACAVE_SERVER_LISTEN_ADDR="0.0.0.0:5433" \
+DATACAVE_STORAGE_DATA_DIR="/data" \
+datacave-server serve --config config.toml
+```
+
+<Note>Environment variable support may vary. Check your deployment documentation.</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Clustering" icon="server" href="/operations/clustering">
+    Configure sharding and replication
+  </Card>
+  <Card title="Performance Tuning" icon="gauge" href="/operations/performance">
+    Optimize storage and compaction settings
+  </Card>
+  <Card title="Security" icon="shield" href="/guides/security">
+    Set up TLS and authentication
+  </Card>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Configure metrics and alerts
+  </Card>
+</CardGroup>

@@ -1,0 +1,596 @@
+---
+title: PostgreSQL Wire Protocol
+description: Implementation of PostgreSQL wire protocol for client compatibility, including message types, authentication flow, and extended query protocol
+---
+
+Datacave implements the PostgreSQL wire protocol to provide seamless compatibility with existing PostgreSQL clients and tools. This means you can use `psql`, DBeaver, language drivers (psycopg2, node-postgres, etc.) without modification.
+
+<Note>
+Datacave speaks the PostgreSQL **wire protocol** for client compatibility. The server implementation is entirely Datacave-specific with no PostgreSQL engine dependency.
+</Note>
+
+## Protocol Overview
+
+The PostgreSQL wire protocol is a message-based, TCP protocol operating on port 5432 (or configurable). Messages flow bidirectionally:
+
+```
+┌──────────┐                           ┌──────────┐
+│  Client  │◄─────────────────────────►│  Server  │
+│ (psql)   │   Frontend/Backend Msgs   │(Datacave)│
+└──────────┘                           └──────────┘
+```
+
+- **Frontend Messages**: Client → Server (e.g., Query, Bind, Execute)
+- **Backend Messages**: Server → Client (e.g., RowDescription, DataRow, ReadyForQuery)
+
+## Connection Lifecycle
+
+### 1. Startup Phase
+
+Client sends startup message with protocol version and parameters:
+
+```rust filename="datacave-protocol/src/frontend.rs:128-135" showLineNumbers
+pub async fn read_startup<S: AsyncRead + Unpin>(stream: &mut S) -> Result<FrontendMessage> {
+    let len = stream.read_i32().await? as usize;
+    let _protocol = stream.read_i32().await?;
+    let mut buf = vec![0u8; len - 8];
+    stream.read_exact(&mut buf).await?;
+    let params = parse_params(&buf);
+    Ok(FrontendMessage::Startup { params })
+}
+```
+
+Startup parameters typically include:
+- `user`: username
+- `database`: database name
+- `application_name`: client identifier
+
+### 2. Authentication
+
+Datacave supports cleartext password authentication:
+
+**Server sends**: `AuthenticationCleartextPassword`
+```rust filename="datacave-protocol/src/backend.rs:14-18" showLineNumbers
+BackendMessage::AuthenticationCleartextPassword => {
+    buf.put_u8(b'R');
+    buf.put_i32(8);
+    buf.put_i32(3);
+}
+```
+
+**Client responds**: `Password` message
+```rust filename="datacave-protocol/src/frontend.rs:150-153" showLineNumbers
+b'p' => {
+    let password = read_cstring(&buf);
+    Ok(FrontendMessage::Password { password })
+}
+```
+
+**Server validates and sends**: `AuthenticationOk`
+```rust filename="datacave-protocol/src/backend.rs:9-13" showLineNumbers
+BackendMessage::AuthenticationOk => {
+    buf.put_u8(b'R');
+    buf.put_i32(8);
+    buf.put_i32(0);
+}
+```
+
+### 3. Initialization
+
+Server sends initialization messages:
+
+**ParameterStatus** (server version, encoding, etc.):
+```rust filename="datacave-protocol/src/backend.rs:19-26" showLineNumbers
+BackendMessage::ParameterStatus { key, value } => {
+    let mut payload = BytesMut::new();
+    put_cstring(&mut payload, &key);
+    put_cstring(&mut payload, &value);
+    buf.put_u8(b'S');
+    buf.put_i32((payload.len() + 4) as i32);
+    buf.extend_from_slice(&payload);
+}
+```
+
+**BackendKeyData** (process ID and secret for cancellation):
+```rust filename="datacave-protocol/src/backend.rs:27-32" showLineNumbers
+BackendMessage::BackendKeyData { pid, secret } => {
+    buf.put_u8(b'K');
+    buf.put_i32(12);
+    buf.put_i32(pid);
+    buf.put_i32(secret);
+}
+```
+
+**ReadyForQuery** (transaction state):
+```rust filename="datacave-protocol/src/backend.rs:33-37" showLineNumbers
+BackendMessage::ReadyForQuery { state } => {
+    buf.put_u8(b'Z');
+    buf.put_i32(5);
+    buf.put_u8(state.wire_byte());
+}
+```
+
+Transaction states:
+```rust filename="datacave-protocol/src/messages.rs:62-76" showLineNumbers
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransactionState {
+    Idle,
+    Transaction,
+    Error,
+}
+
+impl TransactionState {
+    pub fn wire_byte(self) -> u8 {
+        match self {
+            TransactionState::Idle => b'I',
+            TransactionState::Transaction => b'T',
+            TransactionState::Error => b'E',
+        }
+    }
+}
+```
+
+## Message Types
+
+### Frontend Messages (Client → Server)
+
+```rust filename="datacave-protocol/src/messages.rs:3-43" showLineNumbers
+#[derive(Debug, Clone)]
+pub enum FrontendMessage {
+    Startup { params: HashMap<String, String> },
+    Query { sql: String },
+    Password { password: String },
+    Terminate,
+    Unsupported { code: u8 },
+    /// Extended query: Parse (P)
+    Parse {
+        statement_name: String,
+        query: String,
+        param_oids: Vec<i32>,
+    },
+    /// Extended query: Bind (B)
+    Bind {
+        portal_name: String,
+        statement_name: String,
+        param_format_codes: Vec<i16>,
+        param_values: Vec<Option<Vec<u8>>>,
+        result_format_codes: Vec<i16>,
+    },
+    /// Extended query: Describe (D)
+    Describe {
+        target: DescribeTarget,
+        name: String,
+    },
+    /// Extended query: Execute (E)
+    Execute {
+        portal_name: String,
+        max_rows: i32,
+    },
+    /// Extended query: Sync (S)
+    Sync,
+    /// Extended query: Flush (H) - request backend to flush output buffer
+    Flush,
+    /// Extended query: Close (C) - close portal or statement
+    Close {
+        target: CloseTarget,
+        name: String,
+    },
+}
+```
+
+<AccordionGroup>
+  <Accordion title="Query (Q) - Simple Query" icon="q">
+    Executes a single SQL statement or semicolon-separated batch.
+    
+    ```rust
+    FrontendMessage::Query { sql: "SELECT * FROM users" }
+    ```
+    
+    Parsing:
+    ```rust filename="datacave-protocol/src/frontend.rs:146-149" showLineNumbers
+    b'Q' => {
+        let sql = read_cstring(&buf);
+        Ok(FrontendMessage::Query { sql })
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Parse (P) - Prepare Statement" icon="p">
+    Creates a named prepared statement.
+    
+    ```rust
+    FrontendMessage::Parse {
+        statement_name: "stmt1",
+        query: "SELECT * FROM users WHERE id = $1",
+        param_oids: vec![23], // int4
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Bind (B) - Bind Parameters" icon="b">
+    Binds parameters to a prepared statement, creating a portal.
+    
+    ```rust
+    FrontendMessage::Bind {
+        portal_name: "portal1",
+        statement_name: "stmt1",
+        param_format_codes: vec![0], // text format
+        param_values: vec![Some(b"123".to_vec())],
+        result_format_codes: vec![0],
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Execute (E) - Execute Portal" icon="e">
+    Executes a bound portal (prepared statement with parameters).
+    
+    ```rust
+    FrontendMessage::Execute {
+        portal_name: "portal1",
+        max_rows: 0, // 0 = all rows
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Describe (D) - Describe Statement/Portal" icon="d">
+    Requests metadata about a prepared statement or portal.
+    
+    ```rust
+    FrontendMessage::Describe {
+        target: DescribeTarget::Statement,
+        name: "stmt1",
+    }
+    ```
+  </Accordion>
+
+  <Accordion title="Sync (S) - Synchronize" icon="s">
+    Marks end of extended query sequence; server sends ReadyForQuery.
+  </Accordion>
+
+  <Accordion title="Close (C) - Close Statement/Portal" icon="c">
+    Closes a named statement or portal to free resources.
+    
+    ```rust
+    FrontendMessage::Close {
+        target: CloseTarget::Portal,
+        name: "portal1",
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+### Backend Messages (Server → Client)
+
+```rust filename="datacave-protocol/src/messages.rs:132-149" showLineNumbers
+#[derive(Debug, Clone)]
+pub enum BackendMessage {
+    AuthenticationOk,
+    AuthenticationCleartextPassword,
+    ParameterStatus { key: String, value: String },
+    BackendKeyData { pid: i32, secret: i32 },
+    ReadyForQuery { state: TransactionState },
+    ParseComplete,
+    BindComplete,
+    NoData,
+    /// ParameterDescription (t) – parameter OIDs for prepared statement.
+    ParameterDescription { param_oids: Vec<i32> },
+    RowDescription { fields: Vec<RowDescriptionField> },
+    DataRow { values: Vec<Option<Vec<u8>>> },
+    CommandComplete { tag: String },
+    ErrorResponse { message: String },
+    CloseComplete,
+}
+```
+
+<AccordionGroup>
+  <Accordion title="RowDescription (T)" icon="table">
+    Describes result set columns before DataRow messages.
+    
+    ```rust filename="datacave-protocol/src/backend.rs:60-75" showLineNumbers
+    BackendMessage::RowDescription { fields } => {
+        let mut payload = BytesMut::new();
+        payload.put_i16(fields.len() as i16);
+        for field in fields {
+            put_cstring(&mut payload, &field.name);
+            payload.put_i32(0);
+            payload.put_i16(0);
+            payload.put_i32(field.type_oid);
+            payload.put_i16(-1);
+            payload.put_i32(0);
+            payload.put_i16(0);
+        }
+        buf.put_u8(b'T');
+        buf.put_i32((payload.len() + 4) as i32);
+        buf.extend_from_slice(&payload);
+    }
+    ```
+    
+    Each field includes:
+    - Column name
+    - Type OID (e.g., 23=int4, 25=text, 20=int8)
+    - Type modifier, column attribute number, format code
+  </Accordion>
+
+  <Accordion title="DataRow (D)" icon="table-rows">
+    Contains a single row of query results.
+    
+    ```rust filename="datacave-protocol/src/backend.rs:76-91" showLineNumbers
+    BackendMessage::DataRow { values } => {
+        let mut payload = BytesMut::new();
+        payload.put_i16(values.len() as i16);
+        for value in values {
+            match value {
+                Some(v) => {
+                    payload.put_i32(v.len() as i32);
+                    payload.extend_from_slice(&v);
+                }
+                None => payload.put_i32(-1),
+            }
+        }
+        buf.put_u8(b'D');
+        buf.put_i32((payload.len() + 4) as i32);
+        buf.extend_from_slice(&payload);
+    }
+    ```
+    
+    NULL values encoded as length -1.
+  </Accordion>
+
+  <Accordion title="CommandComplete (C)" icon="check">
+    Indicates completion of a command with a tag.
+    
+    ```rust filename="datacave-protocol/src/backend.rs:92-97" showLineNumbers
+    BackendMessage::CommandComplete { tag } => {
+        let mut payload = BytesMut::new();
+        put_cstring(&mut payload, &tag);
+        buf.put_u8(b'C');
+        buf.put_i32((payload.len() + 4) as i32);
+        buf.extend_from_slice(&payload);
+    }
+    ```
+    
+    Tags: `SELECT 5`, `INSERT 0 3`, `UPDATE 2`, `DELETE 1`, etc.
+  </Accordion>
+
+  <Accordion title="ErrorResponse (E)" icon="triangle-exclamation">
+    Reports an error during query execution.
+    
+    ```rust filename="datacave-protocol/src/backend.rs:99-107" showLineNumbers
+    BackendMessage::ErrorResponse { message } => {
+        let mut payload = BytesMut::new();
+        payload.put_u8(b'M');
+        put_cstring(&mut payload, &message);
+        payload.put_u8(0);
+        buf.put_u8(b'E');
+        buf.put_i32((payload.len() + 4) as i32);
+        buf.extend_from_slice(&payload);
+    }
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Type OID Mapping
+
+PostgreSQL uses Object IDs (OIDs) to identify data types. Datacave maps SQL types to standard PostgreSQL OIDs:
+
+```rust filename="datacave-protocol/src/messages.rs:99-130" showLineNumbers
+pub fn data_type_to_oid(data_type: &str) -> i32 {
+    let upper = data_type.to_uppercase();
+    let s = upper.trim();
+    if s == "INT" || s == "INTEGER" || s == "INT4" {
+        return 23;
+    }
+    if s == "BIGINT" || s == "INT8" {
+        return 20;
+    }
+    if s == "TEXT"
+        || s == "VARCHAR"
+        || s == "CHAR"
+        || s == "CHARACTER"
+        || s.starts_with("CHARACTER VARYING")
+        || s == "VARYING"
+    {
+        return 25;
+    }
+    if s == "BOOLEAN" || s == "BOOL" {
+        return 16;
+    }
+    if s == "FLOAT" || s == "FLOAT4" || s == "REAL" {
+        return 700;
+    }
+    if s == "DOUBLE" || s == "FLOAT8" || s == "DOUBLE PRECISION" {
+        return 701;
+    }
+    if s == "BYTEA" {
+        return 17;
+    }
+    25
+}
+```
+
+| SQL Type | OID | PostgreSQL Type |
+|----------|-----|----------------|
+| INT, INTEGER | 23 | int4 |
+| BIGINT | 20 | int8 |
+| TEXT, VARCHAR | 25 | text |
+| BOOLEAN | 16 | bool |
+| FLOAT, REAL | 700 | float4 |
+| DOUBLE PRECISION | 701 | float8 |
+| BYTEA | 17 | bytea |
+
+<Tip>
+Unknown types default to OID 25 (text) for protocol compatibility.
+</Tip>
+
+## Query Flows
+
+### Simple Query Protocol
+
+Used by `psql` and simple query APIs:
+
+```
+Client                              Server
+  │                                   │
+  ├─── Query("SELECT * FROM t") ────►│
+  │                                   │ Execute
+  │◄────── RowDescription ───────────┤
+  │◄────── DataRow ──────────────────┤
+  │◄────── DataRow ──────────────────┤
+  │◄────── CommandComplete ──────────┤
+  │◄────── ReadyForQuery ────────────┤
+```
+
+### Extended Query Protocol
+
+Used for prepared statements and parameterized queries:
+
+```
+Client                              Server
+  │                                   │
+  ├─── Parse("stmt1", "SELECT...") ─►│
+  │◄────── ParseComplete ────────────┤
+  │                                   │
+  ├─── Bind("portal1", "stmt1", ...)►│
+  │◄────── BindComplete ─────────────┤
+  │                                   │
+  ├─── Describe(Portal, "portal1") ─►│
+  │◄────── RowDescription ───────────┤
+  │                                   │
+  ├─── Execute("portal1", 0) ───────►│
+  │◄────── DataRow ──────────────────┤
+  │◄────── DataRow ──────────────────┤
+  │◄────── CommandComplete ──────────┤
+  │                                   │
+  ├─── Sync ─────────────────────────►│
+  │◄────── ReadyForQuery ────────────┤
+```
+
+<Info>
+Extended query protocol allows:
+- **Prepared statements**: parse once, execute many times
+- **Parameterized queries**: prevent SQL injection
+- **Binary format**: efficient data transfer (not yet implemented in Datacave)
+</Info>
+
+## Message Parsing Example
+
+Parsing a **Parse** message:
+
+```rust filename="datacave-protocol/src/frontend.rs:31-45" showLineNumbers
+fn parse_parse(buf: &[u8]) -> Result<FrontendMessage> {
+    let mut cur = buf;
+    let statement_name = advance_cstring(&mut cur);
+    let query = advance_cstring(&mut cur);
+    let n = advance_i16(&mut cur)? as usize;
+    let mut param_oids = Vec::with_capacity(n);
+    for _ in 0..n {
+        param_oids.push(advance_i32(&mut cur)?);
+    }
+    Ok(FrontendMessage::Parse {
+        statement_name,
+        query,
+        param_oids,
+    })
+}
+```
+
+Helper functions:
+```rust filename="datacave-protocol/src/frontend.rs:6-29" showLineNumbers
+fn advance_cstring(buf: &mut &[u8]) -> String {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    let s = String::from_utf8_lossy(&buf[..end]).to_string();
+    *buf = &buf[(end + 1).min(buf.len())..];
+    s
+}
+
+fn advance_i16(buf: &mut &[u8]) -> Result<i16> {
+    if buf.len() < 2 {
+        return Err(anyhow!("buffer too short for i16"));
+    }
+    let v = i16::from_be_bytes([buf[0], buf[1]]);
+    *buf = &buf[2..];
+    Ok(v)
+}
+
+fn advance_i32(buf: &mut &[u8]) -> Result<i32> {
+    if buf.len() < 4 {
+        return Err(anyhow!("buffer too short for i32"));
+    }
+    let v = i32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    *buf = &buf[4..];
+    Ok(v)
+}
+```
+
+## Protocol Compatibility
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Startup / Authentication | ✅ Supported | Cleartext password only |
+| Simple Query (Q) | ✅ Supported | Multi-statement batches |
+| Extended Query (Parse/Bind/Execute) | ✅ Supported | Basic prepared statements |
+| RowDescription / DataRow | ✅ Supported | Text format only |
+| CommandComplete | ✅ Supported | Standard tags |
+| ErrorResponse | ✅ Supported | Error message field |
+| ReadyForQuery | ✅ Supported | Transaction state tracking |
+| Flush (H) | ✅ Supported | No-op in current implementation |
+| Close (C) | ✅ Supported | Portal and statement cleanup |
+| Binary Format | ❌ Not supported | Text format only |
+| COPY Protocol | ❌ Not supported | Planned |
+| SSL/TLS | ✅ Configurable | Via server TLS config |
+
+<Warning>
+Datacave does **not** support binary result format (format code 1). All results are text-encoded.
+</Warning>
+
+## Client Compatibility
+
+Datacave works with standard PostgreSQL clients:
+
+<CardGroup cols={2}>
+  <Card title="psql" icon="terminal">
+    ```bash
+    psql "host=127.0.0.1 port=5433 user=admin dbname=default"
+    ```
+  </Card>
+  <Card title="DBeaver" icon="database">
+    Use PostgreSQL driver with Datacave connection details
+  </Card>
+  <Card title="Python (psycopg2)" icon="python">
+    ```python
+    import psycopg2
+    conn = psycopg2.connect(
+        host="127.0.0.1",
+        port=5433,
+        user="admin",
+        password="...",
+        database="default"
+    )
+    ```
+  </Card>
+  <Card title="Node.js (pg)" icon="node-js">
+    ```javascript
+    const { Client } = require('pg')
+    const client = new Client({
+      host: '127.0.0.1',
+      port: 5433,
+      user: 'admin',
+      database: 'default'
+    })
+    ```
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture Overview" icon="diagram-project" href="/architecture/overview">
+    Understand how the protocol layer fits into the system
+  </Card>
+  <Card title="Query Execution" icon="code" href="/architecture/query-execution">
+    See how parsed SQL is executed
+  </Card>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Connect to Datacave with your favorite client
+  </Card>
+</CardGroup>

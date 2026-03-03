@@ -1,0 +1,179 @@
+---
+title: DDL Reference
+description: Data Definition Language - CREATE TABLE and DROP TABLE syntax
+---
+
+Datacave supports basic Data Definition Language (DDL) operations for managing table schemas.
+
+## CREATE TABLE
+
+Create a new table with column definitions and optional primary key constraint.
+
+### Syntax
+
+```sql
+CREATE TABLE table_name (
+  column_name data_type [, ...]
+  [, PRIMARY KEY (column_name)]
+);
+```
+
+### Supported Data Types
+
+- `INT` - 32-bit integer
+- `BIGINT` - 64-bit integer
+- `FLOAT` - 64-bit floating point
+- `TEXT` - Variable-length string
+- `BOOLEAN` - True/false value
+
+### Examples
+
+<CodeGroup>
+```sql Basic Table
+CREATE TABLE users (
+  id INT,
+  name TEXT
+);
+```
+
+```sql With Primary Key
+CREATE TABLE products (
+  id INT,
+  name TEXT,
+  price FLOAT,
+  PRIMARY KEY (id)
+);
+```
+
+```sql All Data Types
+CREATE TABLE example (
+  id BIGINT,
+  name TEXT,
+  age INT,
+  balance FLOAT,
+  active BOOLEAN,
+  PRIMARY KEY (id)
+);
+```
+
+```sql Orders Table
+CREATE TABLE orders (
+  id INT,
+  user_id INT,
+  amount INT,
+  PRIMARY KEY (id)
+);
+```
+</CodeGroup>
+
+### Implementation Notes
+
+- **Single table only**: CREATE TABLE operates on one table at a time
+- **Basic types**: Only the five data types listed above are supported
+- **Primary key**: Use `PRIMARY KEY (column_name)` constraint syntax
+- **No AUTO_INCREMENT**: Manual ID management required
+- **No defaults**: Column default values not supported
+- **No NULL/NOT NULL**: All columns nullable by default
+
+<Warning>
+Datacave does not support:
+- Foreign key constraints
+- CHECK constraints
+- UNIQUE constraints (except PRIMARY KEY)
+- Column defaults
+- AUTO_INCREMENT or SERIAL types
+- Composite primary keys (single column only)
+</Warning>
+
+## DROP TABLE
+
+<Warning>
+`DROP TABLE` is **parser-only** - the parser accepts the syntax, but the planner and executor are not yet wired. This command will parse successfully but not execute.
+</Warning>
+
+### Syntax
+
+```sql
+DROP TABLE table_name;
+```
+
+### Example
+
+```sql
+DROP TABLE users;
+```
+
+### Status
+
+| Feature | Status | Notes |
+|---------|--------|-------|
+| Parser accepts DROP TABLE | ✅ Supported | Syntax validation works |
+| Planner generates plan | ❌ Not implemented | Returns `None` |
+| Executor drops table | ❌ Not implemented | Not wired to storage |
+
+## CREATE INDEX
+
+<Warning>
+`CREATE INDEX` is **not supported** and is planned for a future release.
+</Warning>
+
+Datacave currently performs full table scans for all queries. Index support is on the roadmap to improve query performance.
+
+## Table Catalog
+
+When you create a table, Datacave:
+
+1. **Parses** the CREATE TABLE statement
+2. **Adds** the schema to the in-memory catalog
+3. **Persists** metadata to the LSM storage engine
+
+The catalog tracks:
+- Table name
+- Column names and types
+- Primary key column (if specified)
+
+## Multi-Tenancy
+
+Datacave supports multi-tenant deployments. Tables are isolated by:
+
+- `tenant_id` specified in connection startup parameters
+- Each tenant has its own catalog namespace
+- Storage keys are prefixed with tenant ID
+
+Connect with tenant isolation:
+
+```bash
+psql "host=127.0.0.1 port=5433 user=admin dbname=default options='-c tenant_id=acme'"
+```
+
+## Examples from Tests
+
+These examples are extracted from Datacave's test suite:
+
+```sql Test: create_insert_select_flow
+CREATE TABLE users (id INT, name TEXT);
+```
+
+```sql Test: select_aggregates
+CREATE TABLE t (id INT, val INT);
+```
+
+```sql Test: select_inner_join
+CREATE TABLE orders (id INT, user_id INT, amount INT);
+CREATE TABLE users (id INT, name TEXT);
+```
+
+```sql Test: select_group_by_aggregates
+CREATE TABLE sales (region TEXT, product TEXT, amount INT);
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Insert Data" icon="plus" href="/sql/dml">
+    Learn how to insert rows
+  </Card>
+  <Card title="Query Data" icon="magnifying-glass" href="/sql/queries">
+    Write SELECT statements
+  </Card>
+</CardGroup>

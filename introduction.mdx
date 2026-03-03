@@ -1,0 +1,110 @@
+---
+title: Introduction to Datacave
+description: A high-performance, distributed SQL database built in Rust with LSM-based storage and PostgreSQL compatibility
+---
+
+<img src="/images/datacave.png" alt="Datacave" />
+
+## Welcome to Datacave
+
+Datacave is a high-performance, distributed SQL database built in Rust from the ground up. It uses its own LSM-based storage engine and SQL layer, while speaking the PostgreSQL wire protocol for seamless client connectivity.
+
+<Note>
+  Datacave is designed for write-heavy workloads and modern distributed systems. Use existing PostgreSQL clients and tools while benefiting from custom storage and execution optimized for performance.
+</Note>
+
+## Key features
+
+<CardGroup cols={2}>
+  <Card title="LSM-based storage" icon="database">
+    Optimized for write-heavy workloads with efficient compactions, WAL support, and optional encryption at rest.
+  </Card>
+  
+  <Card title="PostgreSQL compatibility" icon="plug">
+    Full wire protocol support means you can use psql, DBeaver, and any PostgreSQL client library without changes.
+  </Card>
+  
+  <Card title="Distributed architecture" icon="network-wired">
+    Built-in sharding, configurable replication factor, and cluster membership for horizontal scaling.
+  </Card>
+  
+  <Card title="Observability-first" icon="chart-line">
+    Prometheus metrics, health endpoints, audit logging, and structured tracing out of the box.
+  </Card>
+</CardGroup>
+
+## Architecture overview
+
+Datacave is organized as a modular Rust workspace with clean crate boundaries:
+
+- **datacave-core**: Core types, errors, catalog, and shared traits
+- **datacave-lsm**: LSM storage engine with memtables, SSTables, and compaction
+- **datacave-sql**: SQL parsing, query planning, and execution
+- **datacave-protocol**: PostgreSQL wire protocol implementation
+- **datacave-server**: Server binary and connection handling
+
+Data flows from protocol handling → query planning → execution → LSM storage. This separation keeps components independently testable and replaceable.
+
+## Getting started
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="bolt" href="/quickstart">
+    Get Datacave running and execute your first query in under 5 minutes.
+  </Card>
+  
+  <Card title="Installation" icon="download" href="/installation">
+    Detailed installation guide including building from source and Docker setup.
+  </Card>
+  
+  <Card title="Configuration" icon="gear" href="/operations/configuration">
+    Learn how to configure storage, security, clustering, and observability.
+  </Card>
+  
+  <Card title="SQL compatibility" icon="code" href="/sql/overview">
+    Explore supported SQL features including joins, aggregations, and transactions.
+  </Card>
+</CardGroup>
+
+## What's supported
+
+Datacave supports a comprehensive subset of SQL features:
+
+- **DDL**: CREATE TABLE with primary keys and common column types (INT, BIGINT, TEXT, BOOLEAN, FLOAT)
+- **DML**: INSERT, SELECT, UPDATE, DELETE with WHERE clauses
+- **Joins**: INNER JOIN and LEFT JOIN with ON or USING clauses
+- **Aggregations**: COUNT, SUM, AVG, MIN, MAX with GROUP BY and HAVING
+- **Query features**: ORDER BY, LIMIT, OFFSET
+- **Transactions**: BEGIN, COMMIT, ROLLBACK (statement buffering until commit)
+
+<Tip>
+  Check the [SQL compatibility matrix](/sql/compatibility) for detailed feature status and limitations.
+</Tip>
+
+## Use cases
+
+Datacave excels at:
+
+- **High-throughput ingestion**: LSM architecture handles write-heavy workloads efficiently
+- **Analytical queries**: Fast scans and aggregations over large datasets
+- **Distributed systems**: Built-in sharding and replication for horizontal scaling
+- **PostgreSQL migration**: Drop-in replacement for applications using standard PostgreSQL clients
+
+## Next steps
+
+<Steps>
+  <Step title="Try the quickstart">
+    Follow our [quickstart guide](/quickstart) to run Datacave and execute queries in minutes.
+  </Step>
+  
+  <Step title="Explore configuration">
+    Learn about [configuration options](/operations/configuration) for storage, security, and clustering.
+  </Step>
+  
+  <Step title="Review SQL features">
+    Check the [SQL reference](/sql/overview) to understand what's supported.
+  </Step>
+  
+  <Step title="Deploy to production">
+    Review our [deployment guide](/operations/deployment) for production best practices.
+  </Step>
+</Steps>

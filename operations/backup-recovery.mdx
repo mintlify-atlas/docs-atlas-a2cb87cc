@@ -1,0 +1,544 @@
+---
+title: Backup & Recovery
+description: Backup strategies, WAL replay, recovery procedures, and disaster recovery for Datacave
+---
+
+## Overview
+
+Datacave provides multiple backup and recovery mechanisms:
+
+- **Snapshot backups**: Point-in-time copies of data directory
+- **WAL-based recovery**: Replay write-ahead logs for durability
+- **Replication**: Live copies on replica nodes
+- **Export/Import**: Logical backups via SQL dumps
+
+## Write-Ahead Log (WAL)
+
+### WAL Configuration
+
+Enable WAL for durability:
+
+```toml
+[storage]
+wal_enabled = true
+data_dir = "./data"
+```
+
+<ParamField path="wal_enabled" type="boolean" default="true">
+  Enable Write-Ahead Log. **Strongly recommended** for production.
+</ParamField>
+
+### How WAL Works
+
+1. **Write**: All mutations (INSERT, UPDATE, DELETE) are first written to WAL
+2. **Memtable**: Changes are applied to in-memory memtable
+3. **Flush**: Memtable is periodically flushed to SSTable files
+4. **Checkpoint**: WAL segments are deleted after successful flush
+
+### WAL File Structure
+
+```
+data/
+├── wal/
+│   ├── 000001.wal    # Active WAL segment
+│   ├── 000002.wal    # Checkpointed (can be deleted)
+│   └── 000003.wal    # Checkpointed
+├── sstables/
+│   ├── shard-0/
+│   └── shard-1/
+└── metadata/
+```
+
+## Backup Strategies
+
+### Snapshot Backups
+
+Create consistent point-in-time backups.
+
+<Tabs>
+  <Tab title="Manual Snapshot">
+    ```bash
+    # Stop writes (optional for consistency)
+    # Send SIGUSR1 to trigger checkpoint
+    kill -SIGUSR1 $(pgrep datacave-server)
+    
+    # Wait for checkpoint to complete
+    sleep 5
+    
+    # Create backup
+    BACKUP_DIR="/backups/datacave-$(date +%Y%m%d-%H%M%S)"
+    cp -r /var/lib/datacave/data $BACKUP_DIR
+    
+    # Resume writes
+    ```
+    
+    **Pros**: Simple, filesystem-level
+    
+    **Cons**: Requires downtime for consistency
+  </Tab>
+  
+  <Tab title="Online Snapshot">
+    ```bash
+    # Create snapshot without stopping server
+    # Uses filesystem snapshot (LVM, ZFS, or Btrfs)
+    
+    # LVM example
+    lvcreate --size 10G --snapshot --name datacave-snap /dev/vg0/datacave
+    
+    # Mount snapshot
+    mkdir -p /mnt/datacave-snap
+    mount /dev/vg0/datacave-snap /mnt/datacave-snap
+    
+    # Copy snapshot data
+    BACKUP_DIR="/backups/datacave-$(date +%Y%m%d-%H%M%S)"
+    cp -r /mnt/datacave-snap/data $BACKUP_DIR
+    
+    # Cleanup
+    umount /mnt/datacave-snap
+    lvremove -f /dev/vg0/datacave-snap
+    ```
+    
+    **Pros**: No downtime, consistent
+    
+    **Cons**: Requires snapshot-capable filesystem
+  </Tab>
+  
+  <Tab title="Cloud Snapshot">
+    ```bash
+    # AWS EBS snapshot
+    aws ec2 create-snapshot \
+      --volume-id vol-1234567890abcdef0 \
+      --description "Datacave backup $(date +%Y-%m-%d)"
+    
+    # GCP persistent disk snapshot
+    gcloud compute disks snapshot datacave-disk \
+      --snapshot-names=datacave-backup-$(date +%Y%m%d) \
+      --zone=us-central1-a
+    
+    # Azure disk snapshot
+    az snapshot create \
+      --resource-group datacave-rg \
+      --source datacave-disk \
+      --name datacave-backup-$(date +%Y%m%d)
+    ```
+    
+    **Pros**: Fast, integrated, incremental
+    
+    **Cons**: Cloud-specific, cost
+  </Tab>
+</Tabs>
+
+### Incremental Backups
+
+Backup only changed data since last backup.
+
+```bash
+#!/bin/bash
+# Incremental backup using rsync
+
+BACKUP_ROOT="/backups/datacave"
+LATEST="$BACKUP_ROOT/latest"
+CURRENT="$BACKUP_ROOT/$(date +%Y%m%d-%H%M%S)"
+
+# Create hardlink-based incremental backup
+rsync -a --link-dest="$LATEST" \
+  /var/lib/datacave/data/ \
+  "$CURRENT/"
+
+# Update 'latest' symlink
+ln -sfn "$CURRENT" "$LATEST"
+
+# Delete backups older than 30 days
+find "$BACKUP_ROOT" -maxdepth 1 -type d -mtime +30 -exec rm -rf {} \;
+```
+
+**Benefits**:
+- Fast incremental backups
+- Space-efficient (hardlinks for unchanged files)
+- Multiple restore points
+
+### Logical Backups (SQL Dump)
+
+Export data as SQL statements.
+
+```bash
+# Export all tables
+psql -h 127.0.0.1 -p 5433 -U admin -d default \
+  -c "\copy (SELECT * FROM users) TO '/backups/users.csv' CSV HEADER"
+
+psql -h 127.0.0.1 -p 5433 -U admin -d default \
+  -c "\copy (SELECT * FROM orders) TO '/backups/orders.csv' CSV HEADER"
+```
+
+**Pros**:
+- Human-readable
+- Portable across versions
+- Selective restore
+
+**Cons**:
+- Slower than physical backups
+- Requires export time proportional to data size
+
+## Recovery Procedures
+
+### WAL Replay Recovery
+
+Recover from WAL after crash or corruption.
+
+<Steps>
+  <Step title="Stop the Server">
+    ```bash
+    # Stop datacave-server
+    systemctl stop datacave
+    # or
+    kill $(pgrep datacave-server)
+    ```
+  </Step>
+  
+  <Step title="Verify WAL Files">
+    ```bash
+    # Check WAL directory
+    ls -lh /var/lib/datacave/data/wal/
+    
+    # Verify WAL integrity (if tool available)
+    datacave-server wal verify --data-dir /var/lib/datacave/data
+    ```
+  </Step>
+  
+  <Step title="Replay WAL">
+    ```bash
+    # Server automatically replays WAL on startup
+    datacave-server serve --config /etc/datacave/config.toml
+    ```
+    
+    The server will:
+    1. Load last checkpoint from metadata
+    2. Replay all WAL entries since checkpoint
+    3. Reconstruct memtable state
+    4. Resume normal operation
+  </Step>
+  
+  <Step title="Verify Recovery">
+    ```bash
+    # Check server health
+    curl http://127.0.0.1:9898/health
+    
+    # Verify data
+    psql -h 127.0.0.1 -p 5433 -U admin -d default \
+      -c "SELECT COUNT(*) FROM users;"
+    ```
+  </Step>
+</Steps>
+
+### Restore from Snapshot
+
+Restore from physical backup.
+
+<Steps>
+  <Step title="Stop the Server">
+    ```bash
+    systemctl stop datacave
+    ```
+  </Step>
+  
+  <Step title="Restore Data Directory">
+    ```bash
+    # Backup current data (optional)
+    mv /var/lib/datacave/data /var/lib/datacave/data.old
+    
+    # Restore from backup
+    BACKUP_DIR="/backups/datacave-20260303-120000"
+    cp -r "$BACKUP_DIR" /var/lib/datacave/data
+    
+    # Set permissions
+    chown -R datacave:datacave /var/lib/datacave/data
+    ```
+  </Step>
+  
+  <Step title="Start Server">
+    ```bash
+    systemctl start datacave
+    
+    # Monitor logs
+    journalctl -u datacave -f
+    ```
+  </Step>
+  
+  <Step title="Verify Restore">
+    ```bash
+    # Check data integrity
+    psql -h 127.0.0.1 -p 5433 -U admin -d default \
+      -c "SELECT COUNT(*) FROM users;"
+    ```
+  </Step>
+</Steps>
+
+### Point-in-Time Recovery (PITR)
+
+Restore to specific timestamp using WAL.
+
+<Note>
+  PITR requires continuous WAL archival. This feature may require additional configuration.
+</Note>
+
+```bash
+# Restore to specific point in time
+datacave-server recover \
+  --data-dir /var/lib/datacave/data \
+  --wal-archive /backups/wal-archive \
+  --target-time "2026-03-03 12:00:00"
+```
+
+## Automated Backup Scripts
+
+### Daily Backup Script
+
+```bash
+#!/bin/bash
+# /usr/local/bin/datacave-backup.sh
+
+set -e
+
+BACKUP_ROOT="/backups/datacave"
+DATE=$(date +%Y%m%d-%H%M%S)
+BACKUP_DIR="$BACKUP_ROOT/$DATE"
+RETENTION_DAYS=30
+
+# Create backup directory
+mkdir -p "$BACKUP_DIR"
+
+# Trigger checkpoint
+kill -SIGUSR1 $(pgrep datacave-server) || true
+sleep 5
+
+# Create snapshot (LVM)
+lvcreate --size 10G --snapshot --name datacave-snap /dev/vg0/datacave
+mount /dev/vg0/datacave-snap /mnt/datacave-snap
+
+# Copy data
+cp -r /mnt/datacave-snap/data "$BACKUP_DIR/"
+
+# Cleanup snapshot
+umount /mnt/datacave-snap
+lvremove -f /dev/vg0/datacave-snap
+
+# Compress backup
+tar -czf "$BACKUP_DIR.tar.gz" -C "$BACKUP_ROOT" "$DATE"
+rm -rf "$BACKUP_DIR"
+
+# Upload to S3 (optional)
+aws s3 cp "$BACKUP_DIR.tar.gz" s3://my-backups/datacave/
+
+# Delete old backups
+find "$BACKUP_ROOT" -name "*.tar.gz" -mtime +$RETENTION_DAYS -delete
+
+echo "Backup completed: $BACKUP_DIR.tar.gz"
+```
+
+### Cron Schedule
+
+```cron
+# Daily backup at 2 AM
+0 2 * * * /usr/local/bin/datacave-backup.sh >> /var/log/datacave-backup.log 2>&1
+
+# Weekly full backup on Sunday at 3 AM
+0 3 * * 0 /usr/local/bin/datacave-full-backup.sh >> /var/log/datacave-backup.log 2>&1
+```
+
+## Disaster Recovery
+
+### DR Plan Checklist
+
+<AccordionGroup>
+  <Accordion title="1. Define RPO and RTO">
+    **RPO (Recovery Point Objective)**: Maximum acceptable data loss
+    - Example: 1 hour → Backup every hour
+    
+    **RTO (Recovery Time Objective)**: Maximum acceptable downtime
+    - Example: 4 hours → Practice recovery to ensure < 4 hour restore
+  </Accordion>
+  
+  <Accordion title="2. Backup Schedule">
+    **Recommended**:
+    - Snapshots: Every 6 hours
+    - WAL archival: Continuous
+    - Full backup: Weekly
+    - Off-site copy: Daily
+  </Accordion>
+  
+  <Accordion title="3. Test Restores">
+    **Monthly**:
+    - Restore latest backup to test environment
+    - Verify data integrity
+    - Measure restore time
+    - Document procedure
+  </Accordion>
+  
+  <Accordion title="4. Geographic Redundancy">
+    **Multi-region**:
+    - Replicate backups to secondary region
+    - Use cloud storage (S3, GCS, Azure Blob)
+    - Consider cross-region replication
+  </Accordion>
+  
+  <Accordion title="5. Runbook">
+    **Document**:
+    - Backup locations
+    - Restore procedures
+    - Contact information
+    - Escalation process
+  </Accordion>
+</AccordionGroup>
+
+### Multi-Region DR Setup
+
+```toml
+# Primary region (us-east-1)
+[cluster]
+replication_factor = 3
+region = "us-east-1"
+dr_replica_regions = ["us-west-2"]
+
+# Backup configuration
+[backup]
+enabled = true
+schedule = "0 */6 * * *"  # Every 6 hours
+remote_storage = "s3://my-backups/datacave/us-east-1/"
+dr_remote_storage = "s3://my-backups-dr/datacave/us-west-2/"
+```
+
+## Monitoring Backups
+
+### Backup Metrics
+
+```promql
+# Backup age (time since last backup)
+time() - datacave_backup_last_success_timestamp
+
+# Backup size
+datacave_backup_size_bytes
+
+# Backup duration
+datacave_backup_duration_seconds
+```
+
+### Alerts
+
+```yaml
+groups:
+  - name: datacave-backup
+    rules:
+      - alert: BackupStale
+        expr: (time() - datacave_backup_last_success_timestamp) > 86400
+        for: 1h
+        labels:
+          severity: critical
+        annotations:
+          summary: "Datacave backup is stale"
+          description: "No successful backup in {{ $value }} seconds"
+      
+      - alert: BackupFailed
+        expr: rate(datacave_backup_failures_total[1h]) > 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Datacave backup failures detected"
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="3-2-1 Rule" icon="shield">
+    - **3** copies of data
+    - **2** different storage types
+    - **1** off-site copy
+  </Card>
+  
+  <Card title="Encryption" icon="lock">
+    Encrypt backups at rest:
+    ```bash
+    # GPG encryption
+    tar -czf - /var/lib/datacave/data | \
+      gpg -e -r backup@example.com > backup.tar.gz.gpg
+    ```
+  </Card>
+  
+  <Card title="Verification" icon="check">
+    Always verify backups:
+    ```bash
+    # Test restore monthly
+    # Verify checksums
+    # Validate data integrity
+    ```
+  </Card>
+  
+  <Card title="Retention" icon="calendar">
+    Retention policy:
+    - Daily: 7 days
+    - Weekly: 4 weeks
+    - Monthly: 12 months
+    - Yearly: 7 years
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="WAL replay fails">
+    **Symptoms**: Server crashes during startup with WAL error
+    
+    **Causes**:
+    - Corrupted WAL file
+    - Incomplete write
+    - Disk corruption
+    
+    **Solutions**:
+    ```bash
+    # Skip corrupted WAL segment (data loss!)
+    datacave-server recover --data-dir /var/lib/datacave/data --skip-wal-errors
+    
+    # Or restore from last good backup
+    ```
+  </Accordion>
+  
+  <Accordion title="Backup takes too long">
+    **Symptoms**: Backup duration exceeds RTO
+    
+    **Solutions**:
+    - Use incremental backups (rsync with --link-dest)
+    - Enable filesystem snapshots (LVM, ZFS)
+    - Backup from replica instead of primary
+    - Increase backup parallelism
+  </Accordion>
+  
+  <Accordion title="Restore validation fails">
+    **Symptoms**: Restored data differs from expected
+    
+    **Causes**:
+    - Backup taken during active writes
+    - Incomplete backup
+    - Corruption during transfer
+    
+    **Solutions**:
+    - Use snapshot-based backups for consistency
+    - Verify checksums after backup
+    - Restore from earlier backup
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Monitoring" icon="chart-line" href="/operations/monitoring">
+    Set up backup monitoring and alerts
+  </Card>
+  <Card title="Clustering" icon="server" href="/operations/clustering">
+    Use replication as live backup
+  </Card>
+  <Card title="Security" icon="shield" href="/guides/security">
+    Encrypt backups at rest
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/operations/troubleshooting">
+    Debug backup and recovery issues
+  </Card>
+</CardGroup>

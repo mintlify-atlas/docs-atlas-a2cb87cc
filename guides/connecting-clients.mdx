@@ -1,0 +1,368 @@
+---
+title: Connecting Clients
+description: Learn how to connect to Datacave using psql, DBeaver, and language drivers (Rust, Python, Node.js)
+---
+
+Datacave speaks the PostgreSQL wire protocol, so you can use any PostgreSQL-compatible client to connect. This guide shows you how to connect using common tools and language drivers.
+
+## Connection Parameters
+
+Datacave requires the following connection parameters:
+
+- **Host**: The server address (default: `127.0.0.1`)
+- **Port**: The server port (default: `5433`)
+- **User**: Username for authentication
+- **Database**: Database name (default: `default`)
+- **Password**: User password (when authentication is enabled)
+
+<Note>
+The default listen address is `127.0.0.1:5433` as configured in `config.example.toml`. You can customize this in your configuration file.
+</Note>
+
+## Using psql
+
+`psql` is the PostgreSQL interactive terminal. It works seamlessly with Datacave.
+
+<Steps>
+  <Step title="Install psql">
+    Install the PostgreSQL client tools for your platform:
+    
+    ```bash
+    # macOS
+    brew install postgresql
+    
+    # Ubuntu/Debian
+    sudo apt-get install postgresql-client
+    
+    # Fedora/RHEL
+    sudo dnf install postgresql
+    ```
+  </Step>
+  
+  <Step title="Connect to Datacave">
+    Use the connection string format:
+    
+    ```bash
+    psql "host=127.0.0.1 port=5433 user=admin dbname=default"
+    ```
+    
+    Or use individual flags:
+    
+    ```bash
+    psql -h 127.0.0.1 -p 5433 -U admin -d default
+    ```
+  </Step>
+  
+  <Step title="Enter password">
+    If authentication is enabled, you'll be prompted for a password. The default admin password in `config.example.toml` is `change-me`.
+    
+    <Warning>
+    Always change the default password in production environments!
+    </Warning>
+  </Step>
+  
+  <Step title="Run SQL commands">
+    Once connected, you can run SQL commands:
+    
+    ```sql
+    CREATE TABLE users (
+      id BIGINT PRIMARY KEY,
+      name TEXT,
+      email TEXT
+    );
+    
+    INSERT INTO users VALUES (1, 'Alice', 'alice@example.com');
+    
+    SELECT * FROM users;
+    ```
+  </Step>
+</Steps>
+
+## Using DBeaver
+
+DBeaver is a popular universal database tool that supports PostgreSQL connections.
+
+<Steps>
+  <Step title="Download DBeaver">
+    Download and install DBeaver from [dbeaver.io](https://dbeaver.io/download/)
+  </Step>
+  
+  <Step title="Create a new connection">
+    1. Click **New Database Connection** (or press `Ctrl+N`)
+    2. Select **PostgreSQL** from the connection type list
+    3. Click **Next**
+  </Step>
+  
+  <Step title="Configure connection settings">
+    Enter the following connection details:
+    
+    - **Host**: `127.0.0.1`
+    - **Port**: `5433`
+    - **Database**: `default`
+    - **Username**: `admin`
+    - **Password**: `change-me` (or your configured password)
+    
+    Click **Test Connection** to verify the connection works.
+  </Step>
+  
+  <Step title="Finish and connect">
+    Click **Finish** to save the connection. Double-click the connection in the Database Navigator to connect and start running queries.
+  </Step>
+</Steps>
+
+<Note>
+DBeaver may show warnings about missing PostgreSQL system tables or features. These can be safely ignored - Datacave implements the PostgreSQL wire protocol but uses its own storage engine.
+</Note>
+
+## Language Drivers
+
+### Rust
+
+Use the `tokio-postgres` crate for async connections or `postgres` for synchronous connections.
+
+<Steps>
+  <Step title="Add dependency">
+    Add to your `Cargo.toml`:
+    
+    ```toml
+    [dependencies]
+    tokio-postgres = "0.7"
+    tokio = { version = "1", features = ["full"] }
+    ```
+  </Step>
+  
+  <Step title="Connect and query">
+    ```rust
+    use tokio_postgres::{NoTls, Error};
+    
+    #[tokio::main]
+    async fn main() -> Result<(), Error> {
+        // Connect to Datacave
+        let (client, connection) = tokio_postgres::connect(
+            "host=127.0.0.1 port=5433 user=admin password=change-me dbname=default",
+            NoTls,
+        ).await?;
+    
+        // Spawn connection handler
+        tokio::spawn(async move {
+            if let Err(e) = connection.await {
+                eprintln!("connection error: {}", e);
+            }
+        });
+    
+        // Create table
+        client.execute(
+            "CREATE TABLE users (id BIGINT PRIMARY KEY, name TEXT, email TEXT)",
+            &[],
+        ).await?;
+    
+        // Insert data
+        client.execute(
+            "INSERT INTO users VALUES ($1, $2, $3)",
+            &[&1i64, &"Alice", &"alice@example.com"],
+        ).await?;
+    
+        // Query data
+        let rows = client.query("SELECT id, name, email FROM users", &[]).await?;
+        for row in rows {
+            let id: i64 = row.get(0);
+            let name: &str = row.get(1);
+            let email: &str = row.get(2);
+            println!("User {}: {} ({})", id, name, email);
+        }
+    
+        Ok(())
+    }
+    ```
+  </Step>
+</Steps>
+
+### Python
+
+Use the `psycopg2` or `psycopg` (psycopg3) library for Python connections.
+
+<Steps>
+  <Step title="Install psycopg2">
+    ```bash
+    pip install psycopg2-binary
+    ```
+  </Step>
+  
+  <Step title="Connect and query">
+    ```python
+    import psycopg2
+    
+    # Connect to Datacave
+    conn = psycopg2.connect(
+        host="127.0.0.1",
+        port=5433,
+        user="admin",
+        password="change-me",
+        dbname="default"
+    )
+    
+    # Create a cursor
+    cur = conn.cursor()
+    
+    # Create table
+    cur.execute("""
+        CREATE TABLE users (
+            id BIGINT PRIMARY KEY,
+            name TEXT,
+            email TEXT
+        )
+    """)
+    
+    # Insert data
+    cur.execute(
+        "INSERT INTO users VALUES (%s, %s, %s)",
+        (1, "Alice", "alice@example.com")
+    )
+    
+    # Commit transaction
+    conn.commit()
+    
+    # Query data
+    cur.execute("SELECT id, name, email FROM users")
+    for row in cur.fetchall():
+        print(f"User {row[0]}: {row[1]} ({row[2]})")
+    
+    # Close cursor and connection
+    cur.close()
+    conn.close()
+    ```
+  </Step>
+</Steps>
+
+### Node.js
+
+Use the `pg` (node-postgres) library for Node.js connections.
+
+<Steps>
+  <Step title="Install pg">
+    ```bash
+    npm install pg
+    ```
+  </Step>
+  
+  <Step title="Connect and query">
+    ```javascript
+    const { Client } = require('pg');
+    
+    async function main() {
+      // Connect to Datacave
+      const client = new Client({
+        host: '127.0.0.1',
+        port: 5433,
+        user: 'admin',
+        password: 'change-me',
+        database: 'default',
+      });
+    
+      await client.connect();
+    
+      // Create table
+      await client.query(`
+        CREATE TABLE users (
+          id BIGINT PRIMARY KEY,
+          name TEXT,
+          email TEXT
+        )
+      `);
+    
+      // Insert data
+      await client.query(
+        'INSERT INTO users VALUES ($1, $2, $3)',
+        [1, 'Alice', 'alice@example.com']
+      );
+    
+      // Query data
+      const res = await client.query('SELECT id, name, email FROM users');
+      res.rows.forEach(row => {
+        console.log(`User ${row.id}: ${row.name} (${row.email})`);
+      });
+    
+      await client.end();
+    }
+    
+    main().catch(console.error);
+    ```
+  </Step>
+</Steps>
+
+## Connection Pooling
+
+For production applications, use connection pooling to manage database connections efficiently.
+
+### Node.js with pg Pool
+
+```javascript
+const { Pool } = require('pg');
+
+const pool = new Pool({
+  host: '127.0.0.1',
+  port: 5433,
+  user: 'admin',
+  password: 'change-me',
+  database: 'default',
+  max: 20, // Maximum connections
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 2000,
+});
+
+// Use pool.query() for queries
+const result = await pool.query('SELECT * FROM users WHERE id = $1', [1]);
+```
+
+### Python with psycopg2 Pool
+
+```python
+from psycopg2 import pool
+
+connection_pool = pool.SimpleConnectionPool(
+    1,  # Minimum connections
+    20, # Maximum connections
+    host="127.0.0.1",
+    port=5433,
+    user="admin",
+    password="change-me",
+    dbname="default"
+)
+
+# Get connection from pool
+conn = connection_pool.getconn()
+cur = conn.cursor()
+cur.execute("SELECT * FROM users")
+# ... use connection ...
+connection_pool.putconn(conn)
+```
+
+<Note>
+Datacave's default `max_connections` is 1024 as configured in `config.example.toml`. Ensure your connection pool size doesn't exceed this limit.
+</Note>
+
+## Troubleshooting
+
+### Connection Refused
+
+If you get "connection refused" errors:
+
+1. Verify Datacave is running: `ps aux | grep datacave`
+2. Check the listen address in your config matches your connection string
+3. Ensure no firewall is blocking port 5433
+
+### Authentication Failed
+
+If authentication fails:
+
+1. Verify `security.auth.enabled = true` in your config
+2. Check username and password match a configured user
+3. Ensure the user has the correct roles assigned
+
+### Protocol Mismatch Warnings
+
+Some PostgreSQL clients may log warnings about missing system tables or unsupported features. These are expected - Datacave implements the PostgreSQL wire protocol but uses its own storage and catalog system.
+
+<Warning>
+Datacave does not support all PostgreSQL features. See the [SQL Compatibility](/sql/compatibility) page for supported features.
+</Warning>

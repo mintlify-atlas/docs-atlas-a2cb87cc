@@ -1,0 +1,334 @@
+---
+title: datacave-sql
+description: SQL parser, planner, and executor APIs for query processing
+---
+
+# datacave-sql
+
+The `datacave-sql` crate provides SQL parsing, query planning, and execution with support for joins, aggregates, grouping, and ordering.
+
+## Module Structure
+
+Located at `crates/datacave-sql/src/`:
+
+- **lib.rs:1-12** - Public exports
+- **parser.rs** - SQL parsing
+- **planner.rs** - Query plan generation
+- **executor.rs** - Query execution
+- **catalog.rs** - Catalog integration
+- **vectorized.rs** - Vectorized execution
+
+## SQL Parser
+
+### parse_sql
+
+Parses SQL text into AST statements.
+
+**Source:** `crates/datacave-sql/src/parser.rs:6-10`
+
+```rust
+pub fn parse_sql(sql: &str) -> Result<Vec<Statement>>
+```
+
+Uses PostgreSQL dialect from `sqlparser` crate.
+
+**Example:**
+
+```rust
+use datacave_sql::parse_sql;
+
+let stmts = parse_sql("SELECT * FROM users WHERE id = 1")?;
+```
+
+## Query Planner
+
+Converts SQL AST into logical execution plans.
+
+**Source:** `crates/datacave-sql/src/planner.rs`
+
+### Plan Types
+
+```rust
+pub enum Plan {
+    CreateTable(CreateTablePlan),
+    Insert(InsertPlan),
+    Select(SelectPlan),
+    Update(UpdatePlan),
+    Delete(DeletePlan),
+    Begin(BeginPlan),
+    Commit(CommitPlan),
+    Rollback(RollbackPlan),
+}
+```
+
+### SelectPlan
+
+**Source:** `crates/datacave-sql/src/planner.rs:133-147`
+
+```rust
+pub struct SelectPlan {
+    pub table: String,
+    pub joins: Vec<JoinSpec>,
+    pub projection: Vec<ProjectionItem>,
+    pub where_clause: Option<WhereCond>,
+    pub group_by: Vec<String>,
+    pub having: Option<HavingCond>,
+    pub order_by: Vec<OrderBySpec>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+```
+
+### ProjectionItem
+
+```rust
+pub enum ProjectionItem {
+    Column(String, Option<String>), // (name, alias)
+    Aggregate(AggregateFunc, Option<String>, Option<String>), // (func, column, alias)
+    AllColumns,
+}
+```
+
+### AggregateFunc
+
+**Source:** `crates/datacave-sql/src/planner.rs:87-94`
+
+```rust
+pub enum AggregateFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+```
+
+### JoinSpec
+
+**Source:** `crates/datacave-sql/src/planner.rs:96-108`
+
+```rust
+pub enum JoinKind {
+    Inner,
+    LeftOuter,
+}
+
+pub struct JoinSpec {
+    pub kind: JoinKind,
+    pub right_table: String,
+    pub left_column: String,
+    pub right_column: String,
+}
+```
+
+### WHERE Conditions
+
+**Source:** `crates/datacave-sql/src/planner.rs:110-131`
+
+```rust
+pub enum WhereOperand {
+    Column(String),
+    Literal(DataValue),
+}
+
+pub struct WherePredicate {
+    pub left: WhereOperand,
+    pub op: HavingOp,
+    pub right: WhereOperand,
+}
+
+pub enum WhereCond {
+    Predicate(WherePredicate),
+    And(Box<WhereCond>, Box<WhereCond>),
+    Or(Box<WhereCond>, Box<WhereCond>),
+}
+```
+
+### plan_statement
+
+Main planning function.
+
+**Source:** `crates/datacave-sql/src/planner.rs:173-280`
+
+```rust
+pub fn plan_statement(stmt: &Statement) -> Option<Plan>
+```
+
+## SQL Executor
+
+Executes query plans against the storage engine.
+
+**Source:** `crates/datacave-sql/src/executor.rs`
+
+### SqlExecutor
+
+```rust
+pub struct SqlExecutor {
+    catalog: Arc<Mutex<Catalog>>,
+    mvcc: Arc<MvccManager>,
+    storage: Arc<LsmEngine>,
+    table_seq: Arc<Mutex<HashMap<String, u64>>>,
+}
+
+impl SqlExecutor {
+    pub fn new(
+        catalog: Arc<Mutex<Catalog>>,
+        mvcc: Arc<MvccManager>,
+        storage: Arc<LsmEngine>
+    ) -> Self
+    
+    pub async fn execute(
+        &self,
+        stmt: &Statement,
+        tenant_id: Option<&str>
+    ) -> Result<SqlResult, DatacaveError>
+    
+    pub async fn execute_vectorized(
+        &self,
+        stmt: &Statement,
+        tenant_id: Option<&str>
+    ) -> Result<ColumnBatch, DatacaveError>
+}
+```
+
+**Source:** `crates/datacave-sql/src/executor.rs:15-54`
+
+### Execution Methods
+
+#### execute
+
+**Source:** `crates/datacave-sql/src/executor.rs:33-45`
+
+Executes a statement and returns row-oriented results.
+
+```rust
+let result = executor.execute(&stmt, Some("tenant_a")).await?;
+println!("Rows affected: {}", result.rows_affected);
+```
+
+#### CREATE TABLE
+
+**Source:** `crates/datacave-sql/src/executor.rs:56-68`
+
+Creates a table schema in the catalog.
+
+#### INSERT
+
+**Source:** `crates/datacave-sql/src/executor.rs:70-102`
+
+Inserts rows with auto-incrementing row IDs. Supports multi-tenancy via tenant_id prefix.
+
+**Row Key Encoding:** `tenant|table|row_id` (executor.rs:444-454)
+
+#### SELECT
+
+**Source:** `crates/datacave-sql/src/executor.rs:128-186`
+
+Supports:
+- Projection (columns, aggregates, *)
+- WHERE filtering
+- JOINs (inner, left outer)
+- GROUP BY with aggregates
+- HAVING clauses
+- ORDER BY (column/alias/position)
+- LIMIT/OFFSET
+
+**Join Execution:** `crates/datacave-sql/src/executor.rs:188-303`
+
+#### UPDATE
+
+**Source:** `crates/datacave-sql/src/executor.rs:329-381`
+
+Updates rows matching WHERE clause.
+
+#### DELETE
+
+**Source:** `crates/datacave-sql/src/executor.rs:383-427`
+
+Deletes rows matching WHERE clause using versioned tombstones.
+
+### Aggregates
+
+Aggregates are computed over filtered rows:
+
+**Source:** `crates/datacave-sql/src/executor.rs:855-917`
+
+```rust
+fn compute_aggregates(
+    projection: &[ProjectionItem],
+    schema: &[Column],
+    rows: &[DataRow],
+) -> Result<(Vec<Column>, DataRow), DatacaveError>
+```
+
+**Grouped Aggregates:** `crates/datacave-sql/src/executor.rs:495-643`
+
+Groups rows by GROUP BY columns, computes aggregates per group, and filters with HAVING.
+
+### Row Filtering
+
+**WHERE evaluation:** `crates/datacave-sql/src/executor.rs:784-831`
+
+```rust
+fn evaluate_where(cond: &WhereCond, row: &DataRow, schema: &[Column]) -> bool
+```
+
+Supports AND, OR, and comparison operators (=, !=, &gt;, &gt;=, &lt;, &lt;=).
+
+### Ordering and Pagination
+
+**Source:** `crates/datacave-sql/src/executor.rs:736-782`
+
+```rust
+fn apply_order_limit(
+    columns: &[Column],
+    mut rows: Vec<DataRow>,
+    order_by: &[OrderBySpec],
+    limit: Option<u64>,
+    offset: Option<u64>,
+) -> Result<Vec<DataRow>, DatacaveError>
+```
+
+Sorts by multiple columns (ASC/DESC) and applies LIMIT/OFFSET.
+
+## Multi-Tenancy
+
+The executor supports multi-tenancy through optional `tenant_id`:
+
+- Keys are prefixed with tenant ID
+- Row sequences are isolated per tenant
+- `encode_row_key` creates tenant-scoped keys (executor.rs:444)
+
+## Example Usage
+
+```rust
+use datacave_sql::{parse_sql, SqlExecutor};
+use datacave_core::{Catalog, MvccManager};
+use datacave_lsm::LsmEngine;
+use std::sync::{Arc, Mutex};
+
+let catalog = Arc::new(Mutex::new(Catalog::new()));
+let mvcc = Arc::new(MvccManager::new());
+let storage = Arc::new(LsmEngine::open(options).await?);
+
+let executor = SqlExecutor::new(catalog, mvcc, storage);
+
+let stmts = parse_sql("SELECT name, COUNT(*) FROM users GROUP BY name")?;
+for stmt in stmts {
+    let result = executor.execute(&stmt, None).await?;
+    println!("Columns: {:?}", result.columns);
+    println!("Rows: {:?}", result.rows);
+}
+```
+
+## Dependencies
+
+```toml
+anyhow = "1"
+datacave-core = { path = "../datacave-core" }
+datacave-lsm = { path = "../datacave-lsm" }
+sqlparser = "0.45"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"
+bincode = "1"
+```

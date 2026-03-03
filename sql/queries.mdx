@@ -1,0 +1,328 @@
+---
+title: Query Reference
+description: SELECT statements, WHERE clauses, ORDER BY, LIMIT, and OFFSET
+---
+
+Datacave supports comprehensive SELECT query syntax with filtering, ordering, and pagination.
+
+## SELECT Statements
+
+Retrieve rows from one or more tables.
+
+### Syntax
+
+```sql
+SELECT column_list | *
+FROM table_name
+[WHERE condition]
+[ORDER BY column [ASC | DESC]]
+[LIMIT count]
+[OFFSET count];
+```
+
+### Basic SELECT
+
+<CodeGroup>
+```sql All Columns
+SELECT * FROM users;
+```
+
+```sql Specific Columns
+SELECT id, name FROM users;
+```
+
+```sql Qualified Columns
+SELECT users.id, users.name FROM users;
+```
+</CodeGroup>
+
+### Projection
+
+- **`*`**: All columns from the table
+- **Column names**: Comma-separated list
+- **Qualified names**: `table.column` (required for joins with duplicate column names)
+
+### Test Examples
+
+```sql test: create_insert_select_flow
+SELECT * FROM users;
+-- Returns all rows with all columns
+```
+
+```sql test: select_inner_join
+SELECT orders.id, users.name FROM orders 
+INNER JOIN users ON orders.user_id = users.id;
+```
+
+## WHERE Clauses
+
+Filter rows based on predicates. Datacave supports column-literal comparisons with boolean logic.
+
+### Supported Operators
+
+| Operator | Description | Example |
+|----------|-------------|--------|
+| `=` | Equal | `id = 1` |
+| `!=` | Not equal | `status != 'active'` |
+| `>` | Greater than | `amount > 100` |
+| `>=` | Greater than or equal | `age >= 18` |
+| `<` | Less than | `price < 50` |
+| `<=` | Less than or equal | `quantity <= 10` |
+
+### Boolean Logic
+
+- **`AND`**: All conditions must be true
+- **`OR`**: At least one condition must be true
+- **Parentheses**: Group conditions (precedence control)
+
+### Examples
+
+<CodeGroup>
+```sql Simple Equality
+SELECT * FROM users WHERE id = 3;
+```
+
+```sql Inequality
+SELECT * FROM products WHERE price > 25;
+```
+
+```sql AND Condition
+SELECT * FROM orders WHERE user_id = 1 AND amount > 100;
+```
+
+```sql OR Condition
+SELECT * FROM users WHERE id = 2 OR id = 4;
+```
+
+```sql Parenthesized OR
+SELECT * FROM t WHERE (id = 1 OR id = 5) AND val > 10;
+-- Parentheses ensure OR is evaluated first
+```
+
+```sql Mixed AND/OR
+SELECT * FROM t WHERE id > 1 AND val < 40 OR id = 1;
+-- Equivalent to: (id > 1 AND val < 40) OR (id = 1)
+-- AND has higher precedence than OR
+```
+</CodeGroup>
+
+### Test Examples
+
+```sql test: select_where_filtering
+-- WHERE id = 3
+SELECT * FROM t WHERE id = 3;
+-- Returns 1 row: id=3, val=30
+
+-- WHERE val > 25
+SELECT * FROM t WHERE val > 25;
+-- Returns 3 rows: val 30, 40, 50
+
+-- WHERE val >= 30
+SELECT * FROM t WHERE val >= 30;
+-- Returns 3 rows
+
+-- WHERE val < 20
+SELECT * FROM t WHERE val < 20;
+-- Returns 1 row: val=10
+
+-- WHERE val != 30
+SELECT * FROM t WHERE val != 30;
+-- Returns 4 rows (excludes val=30)
+```
+
+### Predicate Format
+
+WHERE predicates must be:
+- **Column op Literal**: `column_name operator value`
+- **Literal op Column**: `value operator column_name` (order doesn't matter)
+
+<Warning>
+Datacave WHERE clauses **do not support**:
+- Column-to-column comparisons (`col1 = col2`)
+- Functions (`UPPER(name) = 'ALICE'`)
+- Subqueries (`id IN (SELECT ...)`)
+- `LIKE` / pattern matching
+- `IS NULL` / `IS NOT NULL`
+- `BETWEEN`
+- `IN` with value lists
+</Warning>
+
+## ORDER BY
+
+Sort query results by one or more columns.
+
+### Syntax
+
+```sql
+ORDER BY column_reference [ASC | DESC]
+```
+
+### Column Reference Formats
+
+- **Column name**: `ORDER BY name`
+- **Qualified column**: `ORDER BY users.name`
+- **1-based position**: `ORDER BY 2` (refers to second column in SELECT list)
+
+### Sort Order
+
+- **`ASC`**: Ascending (default)
+- **`DESC`**: Descending
+
+### Examples
+
+<CodeGroup>
+```sql Ascending (default)
+SELECT id, val FROM t ORDER BY val ASC;
+-- Same as: ORDER BY val
+```
+
+```sql Descending
+SELECT id, val FROM t ORDER BY val DESC;
+```
+
+```sql Position Reference
+SELECT id, val FROM t ORDER BY 2 ASC;
+-- Sorts by second column (val)
+```
+
+```sql With Alias
+SELECT region, SUM(amount) AS total 
+FROM sales 
+GROUP BY region 
+ORDER BY total DESC;
+```
+</CodeGroup>
+
+### Test Examples
+
+```sql test: select_order_by_limit
+-- ORDER BY val ASC, LIMIT 2
+SELECT id, val FROM t ORDER BY val ASC LIMIT 2;
+-- Returns: val=5, val=10 (smallest two)
+
+-- ORDER BY val DESC, LIMIT 2
+SELECT id, val FROM t ORDER BY val DESC LIMIT 2;
+-- Returns: val=40, val=30 (largest two)
+
+-- ORDER BY 2 (position), LIMIT 1, OFFSET 2
+SELECT id, val FROM t ORDER BY 2 ASC LIMIT 1 OFFSET 2;
+-- Returns: val=20 (third in sorted order)
+```
+
+<Info>
+ORDER BY can reference:
+- Columns in the table
+- Aliases defined in SELECT
+- Aggregate results (when used with GROUP BY)
+</Info>
+
+## LIMIT and OFFSET
+
+Paginate query results.
+
+### Syntax
+
+```sql
+LIMIT count [OFFSET count]
+```
+
+### Examples
+
+<CodeGroup>
+```sql First 10 Rows
+SELECT * FROM users LIMIT 10;
+```
+
+```sql Skip First 10, Take Next 10
+SELECT * FROM users LIMIT 10 OFFSET 10;
+```
+
+```sql Pagination (page 3, 20 per page)
+SELECT * FROM products 
+ORDER BY created_at DESC 
+LIMIT 20 OFFSET 40;
+```
+</CodeGroup>
+
+### Implementation Notes
+
+- **LIMIT**: Must be a numeric literal (no expressions)
+- **OFFSET**: Must be a numeric literal
+- OFFSET without LIMIT is not supported (use `LIMIT <large_number> OFFSET n`)
+
+### Test Examples
+
+```sql test: select_order_by_limit
+-- LIMIT 2
+SELECT id, val FROM t ORDER BY val ASC LIMIT 2;
+-- Returns 2 rows
+
+-- LIMIT 1 OFFSET 2
+SELECT id, val FROM t ORDER BY 2 ASC LIMIT 1 OFFSET 2;
+-- Returns 1 row (third in order)
+```
+
+## Complete Query Examples
+
+These examples combine multiple clauses:
+
+<CodeGroup>
+```sql Filtered, Ordered, Limited
+SELECT id, name, price 
+FROM products 
+WHERE price > 50 
+ORDER BY price DESC 
+LIMIT 10;
+```
+
+```sql Complex WHERE with Pagination
+SELECT * FROM orders 
+WHERE (status = 'pending' OR status = 'processing') 
+  AND amount >= 100 
+ORDER BY created_at DESC 
+LIMIT 20 OFFSET 0;
+```
+
+```sql Multi-Column Sort
+SELECT region, product, amount 
+FROM sales 
+WHERE amount > 20 
+ORDER BY region ASC, amount DESC;
+```
+</CodeGroup>
+
+## Query Execution Order
+
+Datacave executes query clauses in this order:
+
+1. **FROM**: Table scan or join
+2. **WHERE**: Filter rows
+3. **GROUP BY**: Group rows (if present)
+4. **HAVING**: Filter groups (if present)
+5. **SELECT**: Project columns
+6. **ORDER BY**: Sort results
+7. **LIMIT/OFFSET**: Paginate
+
+## Performance Considerations
+
+<Warning>
+Datacave currently performs **full table scans** for all queries. Indexes are not yet supported.
+</Warning>
+
+- Use WHERE clauses to filter early
+- LIMIT reduces memory usage for large result sets
+- ORDER BY requires sorting entire result set (before LIMIT)
+- Multi-table joins materialize full join result before filtering
+
+See [LSM Storage](/architecture/storage-engine) for details on storage engine performance.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Joins" icon="link" href="/sql/joins">
+    Multi-table queries
+  </Card>
+  <Card title="Aggregations" icon="calculator" href="/sql/aggregations">
+    COUNT, SUM, AVG, GROUP BY
+  </Card>
+</CardGroup>

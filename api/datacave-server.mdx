@@ -1,0 +1,461 @@
+---
+title: datacave-server
+description: Server binary with CLI commands, configuration types, and coordinator for distributed queries
+---
+
+# datacave-server
+
+The `datacave-server` crate provides the main server binary, configuration management, authentication, sharding coordinator, and Raft-based replication.
+
+## Module Structure
+
+Located at `crates/datacave-server/src/`:
+
+- **main.rs** - CLI entry point
+- **config.rs** - Configuration types
+- **server.rs** - Server implementation
+- **coordinator.rs** - Sharding coordinator
+- **auth.rs** - Authentication
+- **failover.rs** - Failover logic
+- **raft.rs** - Raft consensus
+
+## CLI Commands
+
+The server binary provides three commands.
+
+**Source:** `crates/datacave-server/src/main.rs:15-36`
+
+### serve
+
+Start the database server.
+
+```bash
+datacave-server serve --config config.toml
+```
+
+**Options:**
+- `--config <path>` - Path to configuration file (default: `config.example.toml`)
+
+**Source:** `crates/datacave-server/src/main.rs:24-27`
+
+### check-config
+
+Validate configuration file.
+
+```bash
+datacave-server check-config --config config.toml
+```
+
+Parses and validates the configuration, then exits.
+
+**Source:** `crates/datacave-server/src/main.rs:28-31`
+
+### gen-password-hash
+
+Generate Argon2 password hash for user configuration.
+
+```bash
+datacave-server gen-password-hash --password mypassword
+```
+
+Outputs an Argon2 hash suitable for the `password_hash` field in config.
+
+**Source:** `crates/datacave-server/src/main.rs:32-36` and `main.rs:53-60`
+
+**Example:**
+
+```bash
+$ datacave-server gen-password-hash --password secret123
+$argon2id$v=19$m=19456,t=2,p=1$...
+```
+
+## Configuration
+
+### Config
+
+Root configuration structure.
+
+**Source:** `crates/datacave-server/src/config.rs:3-11`
+
+```rust
+pub struct Config {
+    pub server: ServerConfig,
+    pub storage: StorageConfig,
+    pub sharding: ShardingConfig,
+    pub cluster: ClusterConfig,
+    pub metrics: MetricsConfig,
+    pub security: SecurityConfig,
+}
+
+impl Config {
+    pub fn from_path(path: &str) -> anyhow::Result<Self>
+}
+```
+
+### ServerConfig
+
+**Source:** `crates/datacave-server/src/config.rs:13-18`
+
+```rust
+pub struct ServerConfig {
+    pub listen_addr: String,
+    pub max_connections: usize,
+    pub idle_timeout_secs: Option<u64>,
+}
+```
+
+**Example:**
+
+```toml
+[server]
+listen_addr = "0.0.0.0:5432"
+max_connections = 100
+idle_timeout_secs = 300
+```
+
+### StorageConfig
+
+**Source:** `crates/datacave-server/src/config.rs:20-29`
+
+```rust
+pub struct StorageConfig {
+    pub data_dir: String,
+    pub wal_enabled: bool,
+    pub memtable_max_bytes: usize,
+    pub sstable_target_bytes: usize,
+    pub encryption_enabled: bool,
+    pub encryption_key_base64: Option<String>,
+    pub compaction_interval_secs: Option<u64>,
+}
+```
+
+**Example:**
+
+```toml
+[storage]
+data_dir = "/var/lib/datacave"
+wal_enabled = true
+memtable_max_bytes = 4194304  # 4MB
+sstable_target_bytes = 67108864  # 64MB
+encryption_enabled = false
+compaction_interval_secs = 3600
+```
+
+### ShardingConfig
+
+**Source:** `crates/datacave-server/src/config.rs:31-34`
+
+```rust
+pub struct ShardingConfig {
+    pub shard_count: usize,
+}
+```
+
+### ClusterConfig
+
+**Source:** `crates/datacave-server/src/config.rs:36-39`
+
+```rust
+pub struct ClusterConfig {
+    pub replication_factor: usize,
+}
+```
+
+### MetricsConfig
+
+**Source:** `crates/datacave-server/src/config.rs:41-44`
+
+```rust
+pub struct MetricsConfig {
+    pub listen_addr: String,
+}
+```
+
+**Example:**
+
+```toml
+[metrics]
+listen_addr = "0.0.0.0:9090"
+```
+
+Exposes Prometheus metrics endpoint.
+
+### SecurityConfig
+
+**Source:** `crates/datacave-server/src/config.rs:46-51`
+
+```rust
+pub struct SecurityConfig {
+    pub tls: TlsConfig,
+    pub auth: AuthConfig,
+    pub audit: AuditConfig,
+}
+```
+
+### TlsConfig
+
+**Source:** `crates/datacave-server/src/config.rs:53-58`
+
+```rust
+pub struct TlsConfig {
+    pub enabled: bool,
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
+}
+```
+
+**Example:**
+
+```toml
+[security.tls]
+enabled = true
+cert_path = "/etc/datacave/server.crt"
+key_path = "/etc/datacave/server.key"
+```
+
+### AuthConfig
+
+**Source:** `crates/datacave-server/src/config.rs:60-65`
+
+```rust
+pub struct AuthConfig {
+    pub enabled: bool,
+    pub users: Vec<UserConfig>,
+    pub roles: Vec<RoleConfig>,
+}
+```
+
+### UserConfig
+
+**Source:** `crates/datacave-server/src/config.rs:72-78`
+
+```rust
+pub struct UserConfig {
+    pub username: String,
+    pub password_hash: Option<String>,
+    pub password_plain: Option<String>,
+    pub roles: Vec<String>,
+}
+```
+
+**Example:**
+
+```toml
+[[security.auth.users]]
+username = "admin"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+roles = ["admin"]
+
+[[security.auth.users]]
+username = "readonly"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+roles = ["reader"]
+```
+
+### RoleConfig
+
+**Source:** `crates/datacave-server/src/config.rs:80-86`
+
+```rust
+pub struct RoleConfig {
+    pub name: String,
+    pub can_read: bool,
+    pub can_write: bool,
+    pub is_admin: bool,
+}
+```
+
+**Example:**
+
+```toml
+[[security.auth.roles]]
+name = "admin"
+can_read = true
+can_write = true
+is_admin = true
+
+[[security.auth.roles]]
+name = "reader"
+can_read = true
+can_write = false
+is_admin = false
+```
+
+### AuditConfig
+
+**Source:** `crates/datacave-server/src/config.rs:67-70`
+
+```rust
+pub struct AuditConfig {
+    pub enabled: bool,
+}
+```
+
+### Configuration Validation
+
+**Source:** `crates/datacave-server/src/config.rs:88-126`
+
+The config validates on load:
+
+- Encryption requires a key if enabled
+- TLS requires cert and key paths if enabled
+- Auth requires at least one user if enabled
+- Each user must have a password (hash or plain)
+- Each user must have at least one role
+
+## Coordinator
+
+Manages query routing and result aggregation across shards.
+
+**Source:** `crates/datacave-server/src/coordinator.rs`
+
+### Coordinator
+
+```rust
+pub struct Coordinator {
+    shard_count: usize,
+}
+
+impl Coordinator {
+    pub fn new(shard_count: usize) -> Self
+    
+    pub fn route_plan(&self, stmt: &Statement) -> Vec<ShardPlan>
+    
+    pub fn aggregate(&self, stmt: &Statement, results: Vec<SqlResult>) 
+        -> SqlResult
+}
+```
+
+### ShardPlan
+
+**Source:** `crates/datacave-server/src/coordinator.rs:4-8`
+
+```rust
+pub struct ShardPlan {
+    pub shard_id: usize,
+    pub stmt: Statement,
+}
+```
+
+### route_plan
+
+Routes a statement to appropriate shards.
+
+**Source:** `crates/datacave-server/src/coordinator.rs:20-36`
+
+**Routing Strategy:**
+- **Read-only queries** (SELECT): Route to all shards
+- **Write queries** (INSERT, UPDATE, DELETE, CREATE TABLE): Route to single shard based on table name hash
+
+```rust
+let coordinator = Coordinator::new(4);
+let plans = coordinator.route_plan(&stmt);
+for plan in plans {
+    println!("Shard {}: {:?}", plan.shard_id, plan.stmt);
+}
+```
+
+### aggregate
+
+Combines results from multiple shards.
+
+**Source:** `crates/datacave-server/src/coordinator.rs:38-66`
+
+**Aggregation Strategy:**
+- **Read queries**: Concatenates rows from all shards
+- **Write queries**: Sums `rows_affected`
+
+```rust
+let results = vec![result1, result2, result3, result4];
+let combined = coordinator.aggregate(&stmt, results);
+println!("Total rows: {}", combined.rows.len());
+```
+
+### Hashing Function
+
+**Source:** `crates/datacave-server/src/coordinator.rs:110-116`
+
+```rust
+fn hash_table(name: &str) -> usize
+```
+
+Simple multiplicative hash for consistent shard assignment.
+
+## Example Configuration
+
+**Complete config.toml:**
+
+```toml
+[server]
+listen_addr = "0.0.0.0:5432"
+max_connections = 100
+idle_timeout_secs = 300
+
+[storage]
+data_dir = "/var/lib/datacave"
+wal_enabled = true
+memtable_max_bytes = 4194304
+sstable_target_bytes = 67108864
+encryption_enabled = true
+encryption_key_base64 = "base64encodedkey=="
+compaction_interval_secs = 3600
+
+[sharding]
+shard_count = 4
+
+[cluster]
+replication_factor = 3
+
+[metrics]
+listen_addr = "0.0.0.0:9090"
+
+[security.tls]
+enabled = true
+cert_path = "/etc/datacave/server.crt"
+key_path = "/etc/datacave/server.key"
+
+[security.auth]
+enabled = true
+
+[[security.auth.users]]
+username = "admin"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+roles = ["admin"]
+
+[[security.auth.roles]]
+name = "admin"
+can_read = true
+can_write = true
+is_admin = true
+
+[security.audit]
+enabled = true
+```
+
+## Dependencies
+
+```toml
+anyhow = "1"
+tokio = { version = "1", features = ["net", "io-util", "rt-multi-thread", "macros", "signal"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+axum = "0.7"
+metrics = "0.22"
+metrics-exporter-prometheus = "0.13"
+tokio-rustls = "0.26"
+rustls = "0.22"
+rustls-pemfile = "2"
+base64 = "0.22"
+argon2 = "0.5"
+password-hash = "0.5"
+clap = { version = "4", features = ["derive"] }
+rand_core = "0.6"
+uuid = { version = "1", features = ["v4"] }
+sqlparser = "0.45"
+datacave-core = { path = "../datacave-core" }
+datacave-lsm = { path = "../datacave-lsm" }
+datacave-sql = { path = "../datacave-sql" }
+datacave-protocol = { path = "../datacave-protocol" }
+```

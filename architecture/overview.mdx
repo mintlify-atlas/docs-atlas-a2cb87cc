@@ -1,0 +1,230 @@
+---
+title: Architecture Overview
+description: High-level architecture of Datacave showing how crates work together, data flow, and modular design principles
+---
+
+Datacave is architected as a modular, high-performance SQL database built entirely in Rust. The system is designed around clean separation of concerns, with each crate handling a specific aspect of database functionality.
+
+## System Architecture
+
+Datacave follows a layered architecture where data flows from the PostgreSQL wire protocol through the SQL layer and into the LSM storage engine:
+
+```
+┌─────────────────────────────────────────┐
+│   PostgreSQL Wire Protocol Layer       │
+│   (datacave-protocol)                   │
+└──────────────┬──────────────────────────┘
+               │ Frontend/Backend Messages
+               ▼
+┌─────────────────────────────────────────┐
+│   SQL Layer                             │
+│   (datacave-sql)                        │
+│   Parser → Planner → Executor           │
+└──────────────┬──────────────────────────┘
+               │ Storage Operations
+               ▼
+┌─────────────────────────────────────────┐
+│   LSM Storage Engine                    │
+│   (datacave-lsm)                        │
+│   MemTable → WAL → SSTable              │
+└─────────────────────────────────────────┘
+```
+
+## Crate Organization
+
+The workspace is organized into five focused crates, each with clear responsibilities:
+
+<AccordionGroup>
+  <Accordion title="datacave-core" icon="cube">
+    **Core types, errors, catalog, and shared traits**
+    
+    Provides foundational abstractions used across all other crates:
+    - `Catalog`: table schema management
+    - `DatacaveError`: unified error handling
+    - `MvccManager`: multi-version concurrency control
+    - `DataValue`, `DataRow`: type system for SQL values
+    
+    ```rust filename="datacave-core/src/lib.rs"
+    pub mod catalog;
+    pub mod error;
+    pub mod mvcc;
+    pub mod types;
+    
+    pub use catalog::{Catalog, TableSchema};
+    pub use error::DatacaveError;
+    pub use mvcc::{MvccManager, Snapshot, Version};
+    pub use types::{Column, DataRow, DataValue, SqlResult};
+    ```
+  </Accordion>
+
+  <Accordion title="datacave-lsm" icon="database">
+    **LSM-based storage engine**
+    
+    Implements a Log-Structured Merge-Tree storage system optimized for write-heavy workloads:
+    - In-memory MemTable (BTreeMap-backed)
+    - Write-Ahead Log (WAL) for durability
+    - SSTables (Sorted String Tables) for persistent storage
+    - Background compaction for space reclamation
+    - Optional encryption at rest (AES-256-GCM)
+    
+    See [Storage Engine](/architecture/storage-engine) for details.
+  </Accordion>
+
+  <Accordion title="datacave-sql" icon="code">
+    **SQL parsing, planning, and execution**
+    
+    Transforms SQL statements into executable plans and executes them against the storage engine:
+    - Parser: PostgreSQL dialect using `sqlparser-rs`
+    - Planner: converts AST to execution plans
+    - Executor: runs plans with WHERE filtering, JOINs, aggregations, ORDER BY, LIMIT/OFFSET
+    
+    See [Query Execution](/architecture/query-execution) for details.
+  </Accordion>
+
+  <Accordion title="datacave-protocol" icon="network-wired">
+    **PostgreSQL wire protocol**
+    
+    Implements PostgreSQL's wire protocol for client compatibility:
+    - Frontend message parsing (Query, Parse, Bind, Execute, etc.)
+    - Backend message encoding (RowDescription, DataRow, CommandComplete, etc.)
+    - Authentication flow (cleartext password)
+    - Extended query protocol support
+    
+    See [Wire Protocol](/architecture/wire-protocol) for details.
+  </Accordion>
+
+  <Accordion title="datacave-server" icon="server">
+    **Server binary and connection handling**
+    
+    Main server executable that ties everything together:
+    - TCP connection handling
+    - Session management
+    - Authentication
+    - Metrics and health endpoints
+    - Configuration loading
+  </Accordion>
+</AccordionGroup>
+
+## Data Flow
+
+### Write Path (INSERT)
+
+1. **Client** sends INSERT via PostgreSQL protocol
+2. **Protocol Layer** parses frontend message, extracts SQL
+3. **SQL Parser** converts SQL string to AST (Abstract Syntax Tree)
+4. **SQL Planner** transforms AST into `InsertPlan`
+5. **SQL Executor** serializes row data and calls storage engine
+6. **LSM Engine** writes to WAL, then MemTable
+7. **MemTable** flushes to SSTable when size threshold reached
+
+```rust filename="datacave-lsm/src/engine.rs:67-86" showLineNumbers
+pub async fn put(&self, key: &[u8], value: &[u8], version: Version) -> Result<()> {
+    metrics::counter!("lsm_put").increment(1);
+    let encoded_key = encode_versioned_key(key, version);
+    let encoded_value = encode_value(Some(value));
+    if self.options.wal_enabled {
+        self.wal
+            .lock()
+            .await
+            .append(WalOp::Put, &encoded_key, &encoded_value)
+            .await?;
+    }
+    self.memtable
+        .lock()
+        .await
+        .put(encoded_key, encoded_value);
+    if self.memtable.lock().await.approximate_bytes() >= self.options.memtable_max_bytes {
+        self.flush().await?;
+    }
+    Ok(())
+}
+```
+
+### Read Path (SELECT)
+
+1. **Client** sends SELECT query
+2. **Protocol Layer** parses query message
+3. **SQL Parser** generates AST
+4. **SQL Planner** creates `SelectPlan` with projections, WHERE clause, joins, etc.
+5. **SQL Executor** fetches rows from storage, applies filters and projections
+6. **LSM Engine** checks MemTable first, then SSTables (newest to oldest)
+7. **MVCC** ensures snapshot isolation using version numbers
+8. **Protocol Layer** encodes results as DataRow messages
+
+```rust filename="datacave-lsm/src/engine.rs:106-123" showLineNumbers
+pub async fn get(&self, key: &[u8], snapshot: Version) -> Result<Option<Vec<u8>>> {
+    metrics::counter!("lsm_get").increment(1);
+    let mem = self.memtable.lock().await;
+    if let Some(value) = mem_get_latest(&mem, key, snapshot) {
+        return Ok(decode_value(value));
+    }
+    drop(mem);
+
+    let tables = self.sstables.lock().await.clone();
+    for table in tables.iter().rev() {
+        for entry in table.load_with(self.encryptor.as_ref()).await? {
+            if is_key_match(&entry.key, key, snapshot) {
+                return Ok(decode_value(&entry.value));
+            }
+        }
+    }
+    Ok(None)
+}
+```
+
+## Modular Design Benefits
+
+<CardGroup cols={2}>
+  <Card title="Testability" icon="vial">
+    Each crate can be tested independently with clear boundaries and minimal dependencies
+  </Card>
+  <Card title="Replaceability" icon="arrows-rotate">
+    Storage engine, SQL parser, or protocol layer can be swapped without affecting other components
+  </Card>
+  <Card title="Performance" icon="gauge-high">
+    Async/await throughout with Tokio runtime for high concurrency
+  </Card>
+  <Card title="Observability" icon="chart-line">
+    Metrics instrumentation at crate boundaries for monitoring and debugging
+  </Card>
+</CardGroup>
+
+## Concurrency Model
+
+Datacave uses an async-first design with Tokio:
+
+- **Connection handling**: Each client connection runs on its own async task
+- **Storage engine**: Mutex-protected MemTable and SSTable list for thread-safe access
+- **MVCC**: Version-based snapshot isolation allows concurrent readers without blocking writers
+- **WAL**: Sequential writes protected by mutex, async I/O for performance
+
+<Note>
+The LSM engine's `put` and `get` operations are fully asynchronous, allowing high concurrency even with shared state protected by `Mutex<T>`.
+</Note>
+
+## Key Design Decisions
+
+| Decision | Rationale |
+|----------|----------|
+| **LSM over B-Tree** | Optimized for write-heavy workloads; sequential writes to WAL and SSTables |
+| **PostgreSQL protocol** | Existing ecosystem of clients and tools; no need to build custom drivers |
+| **Rust workspace** | Type safety, zero-cost abstractions, fearless concurrency |
+| **MVCC with versions** | Snapshot isolation without locking readers |
+| **Modular crates** | Clear separation of concerns; easier testing and maintenance |
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Storage Engine" icon="database" href="/architecture/storage-engine">
+    Deep dive into LSM, memtable, SSTables, WAL, compaction, and encryption
+  </Card>
+  <Card title="Query Execution" icon="code" href="/architecture/query-execution">
+    SQL parsing, query planning, and execution pipeline
+  </Card>
+  <Card title="Wire Protocol" icon="network-wired" href="/architecture/wire-protocol">
+    PostgreSQL protocol implementation and message handling
+  </Card>
+  <Card title="Getting Started" icon="rocket" href="/quickstart">
+    Run your first Datacave server and connect with psql
+  </Card>
+</CardGroup>

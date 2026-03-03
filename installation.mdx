@@ -1,0 +1,394 @@
+---
+title: Installation
+description: Detailed installation instructions for Datacave including prerequisites, building from source, and Docker setup
+---
+
+## Prerequisites
+
+Before installing Datacave, ensure your system meets the following requirements:
+
+### System requirements
+
+- **Operating System**: Linux, macOS, or Windows (with WSL2)
+- **RAM**: Minimum 2GB, recommended 4GB or more for production workloads
+- **Disk**: Space for data storage (varies by workload)
+
+### Required software
+
+<CardGroup cols={2}>
+  <Card title="Rust toolchain" icon="rust">
+    Stable Rust 1.75 or later is required to build Datacave from source.
+    
+    Install via [rustup.rs](https://rustup.rs/)
+  </Card>
+  
+  <Card title="PostgreSQL client" icon="database">
+    Any PostgreSQL-compatible client for connecting to Datacave.
+    
+    Examples: `psql`, DBeaver, pgAdmin, or language drivers
+  </Card>
+</CardGroup>
+
+<Tip>
+  To verify your Rust installation, run: `rustc --version`
+</Tip>
+
+## Installation methods
+
+### Building from source
+
+Building from source gives you the latest features and allows for customization.
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/your-org/datacave.git
+    cd datacave
+    ```
+  </Step>
+  
+  <Step title="Build the workspace">
+    Build all crates in the workspace:
+    
+    ```bash
+    cargo build --workspace --release
+    ```
+    
+    The release build is optimized for performance. Development builds (without `--release`) are faster to compile but slower to run.
+    
+    <Note>
+      The first build may take several minutes as Cargo downloads and compiles dependencies.
+    </Note>
+  </Step>
+  
+  <Step title="Verify the build">
+    Check that the server binary was created:
+    
+    ```bash
+    ./target/release/datacave-server --version
+    ```
+    
+    You should see output like: `datacave-server 0.1.0`
+  </Step>
+  
+  <Step title="Set up configuration">
+    Copy the example configuration and customize it:
+    
+    ```bash
+    cp config.example.toml config.toml
+    ```
+    
+    Edit `config.toml` to adjust settings. Key configurations:
+    
+    ```toml config.toml
+    [server]
+    listen_addr = "127.0.0.1:5433"
+    max_connections = 1024
+    idle_timeout_secs = 300
+    
+    [storage]
+    data_dir = "./data"
+    wal_enabled = true
+    memtable_max_bytes = 67108864
+    sstable_target_bytes = 134217728
+    
+    [metrics]
+    listen_addr = "127.0.0.1:9898"
+    ```
+    
+    <Warning>
+      Change the default password in production! See the [Security configuration](#security-configuration) section below.
+    </Warning>
+  </Step>
+  
+  <Step title="Run the server">
+    Start Datacave with your configuration:
+    
+    ```bash
+    ./target/release/datacave-server serve --config config.toml
+    ```
+    
+    Or using cargo:
+    
+    ```bash
+    cargo run -p datacave-server --release -- serve --config config.toml
+    ```
+  </Step>
+</Steps>
+
+### Using Docker
+
+Docker provides an easy way to run Datacave in a containerized environment.
+
+<Steps>
+  <Step title="Build the Docker image">
+    From the repository root, build the Datacave image:
+    
+    ```bash
+    docker build -t datacave:latest .
+    ```
+    
+    This uses the provided Dockerfile which:
+    - Uses Rust 1.75 as the builder image
+    - Compiles Datacave in release mode
+    - Creates a minimal Debian-based runtime image
+    - Includes the example config as `/home/datacave/config.toml`
+  </Step>
+  
+  <Step title="Prepare configuration">
+    Create a custom configuration file on your host:
+    
+    ```bash
+    cp config.example.toml docker-config.toml
+    # Edit docker-config.toml as needed
+    ```
+  </Step>
+  
+  <Step title="Run the container">
+    Run Datacave with volume mounts for config and data:
+    
+    ```bash
+    docker run -d \
+      --name datacave \
+      -p 5433:5433 \
+      -p 9898:9898 \
+      -v $(pwd)/docker-config.toml:/home/datacave/config.toml \
+      -v datacave-data:/home/datacave/data \
+      datacave:latest
+    ```
+    
+    This command:
+    - Runs the container in detached mode (`-d`)
+    - Exposes port 5433 (database) and 9898 (metrics)
+    - Mounts your config file
+    - Creates a named volume for persistent data storage
+  </Step>
+  
+  <Step title="View logs">
+    Check that Datacave started successfully:
+    
+    ```bash
+    docker logs datacave
+    ```
+  </Step>
+  
+  <Step title="Connect to the database">
+    Connect using psql from your host:
+    
+    ```bash
+    psql "host=127.0.0.1 port=5433 user=admin dbname=default"
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  The Dockerfile exposes ports 5433 (database) and 9898 (metrics/health) by default.
+</Note>
+
+### Docker Compose
+
+For multi-container setups, use Docker Compose:
+
+```yaml docker-compose.yml
+version: '3.8'
+
+services:
+  datacave:
+    build: .
+    ports:
+      - "5433:5433"
+      - "9898:9898"
+    volumes:
+      - ./config.toml:/home/datacave/config.toml
+      - datacave-data:/home/datacave/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9898/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  datacave-data:
+```
+
+Run with:
+
+```bash
+docker-compose up -d
+```
+
+## Configuration
+
+### Server configuration
+
+The `[server]` section controls connection handling:
+
+```toml
+[server]
+listen_addr = "127.0.0.1:5433"  # Address and port to listen on
+max_connections = 1024            # Maximum concurrent connections
+idle_timeout_secs = 300           # Idle connection timeout
+```
+
+### Storage configuration
+
+The `[storage]` section configures the LSM engine:
+
+```toml
+[storage]
+data_dir = "./data"                      # Data directory path
+wal_enabled = true                        # Write-ahead log
+memtable_max_bytes = 67108864            # Memtable size (64MB)
+sstable_target_bytes = 134217728         # SSTable target size (128MB)
+compaction_interval_secs = 300           # Compaction interval
+encryption_enabled = false                # Enable encryption at rest
+encryption_key_base64 = "..."            # Base64-encoded 32-byte key
+```
+
+<Tip>
+  Adjust `memtable_max_bytes` and `sstable_target_bytes` based on your workload. Larger values reduce compaction frequency but use more memory.
+</Tip>
+
+### Clustering configuration
+
+Configure sharding and replication:
+
+```toml
+[sharding]
+shard_count = 4
+
+[cluster]
+replication_factor = 3
+```
+
+### Metrics configuration
+
+Expose Prometheus metrics and health endpoints:
+
+```toml
+[metrics]
+listen_addr = "127.0.0.1:9898"
+```
+
+Endpoints:
+- `GET /metrics` - Prometheus metrics
+- `GET /health` - Health check
+- `GET /ready` - Readiness check
+
+### Security configuration
+
+<Warning>
+  Always change default passwords and enable TLS in production environments!
+</Warning>
+
+#### Authentication
+
+Configure users and roles:
+
+```toml
+[security.auth]
+enabled = true
+
+[[security.auth.roles]]
+name = "admin"
+can_read = true
+can_write = true
+is_admin = true
+
+[[security.auth.users]]
+username = "admin"
+password_plain = "change-me"  # Use password_hash in production!
+roles = ["admin"]
+```
+
+#### Generate password hashes
+
+For production, use hashed passwords instead of plain text:
+
+```bash
+cargo run -p datacave-server -- gen-password-hash --password "your-secure-password"
+```
+
+This outputs an Argon2 hash. Use it in your config:
+
+```toml
+[[security.auth.users]]
+username = "admin"
+password_hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+roles = ["admin"]
+```
+
+#### TLS configuration
+
+Enable TLS for encrypted connections:
+
+```toml
+[security.tls]
+enabled = true
+cert_path = "./certs/server.crt"
+key_path = "./certs/server.key"
+```
+
+#### Audit logging
+
+Enable audit logging for compliance:
+
+```toml
+[security.audit]
+enabled = true
+```
+
+## Validate configuration
+
+Before starting the server, validate your configuration:
+
+```bash
+cargo run -p datacave-server -- check-config --config config.toml
+```
+
+If the configuration is valid, you'll see:
+
+```
+config ok: config.toml
+```
+
+## Development setup
+
+For development, you may want to run tests and benchmarks:
+
+<CodeGroup>
+```bash Run tests
+cargo test --workspace
+```
+
+```bash Run benchmarks
+cargo bench -p datacave-lsm
+cargo bench -p datacave-sql
+```
+
+```bash Lint and format
+cargo fmt --all
+cargo clippy --workspace --all-targets
+```
+</CodeGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="bolt" href="/quickstart">
+    Follow the quickstart to run your first queries.
+  </Card>
+  
+  <Card title="Configuration guide" icon="gear" href="/configuration">
+    Deep dive into all configuration options.
+  </Card>
+  
+  <Card title="Security" icon="shield" href="/security">
+    Learn about authentication, TLS, and encryption.
+  </Card>
+  
+  <Card title="Deployment" icon="server" href="/deployment">
+    Production deployment best practices.
+  </Card>
+</CardGroup>

@@ -1,0 +1,278 @@
+---
+title: DML Reference
+description: Data Manipulation Language - INSERT, UPDATE, DELETE syntax
+---
+
+Datacave supports standard Data Manipulation Language (DML) operations for modifying table data.
+
+## INSERT
+
+Insert one or more rows into a table.
+
+### Syntax
+
+```sql
+INSERT INTO table_name [(column_list)] VALUES (value_list) [, ...];
+```
+
+### Features
+
+- **Values list**: Insert multiple rows in a single statement
+- **Column list optional**: Omit to use all columns in schema order
+- **Single-table only**: One table per INSERT statement
+
+### Examples
+
+<CodeGroup>
+```sql Single Row
+INSERT INTO users (id, name) VALUES (1, 'alice');
+```
+
+```sql Multiple Rows
+INSERT INTO users (id, name) VALUES 
+  (1, 'alice'), 
+  (2, 'bob'),
+  (3, 'carol');
+```
+
+```sql Without Column List
+-- Assumes schema: orders(id, user_id, amount)
+INSERT INTO orders VALUES (1, 1, 100);
+```
+
+```sql All Data Types
+INSERT INTO example (id, name, age, balance, active) VALUES
+  (1, 'alice', 30, 1250.50, true),
+  (2, 'bob', 25, 750.00, false);
+```
+</CodeGroup>
+
+### Test Examples
+
+From Datacave's test suite:
+
+```sql test: create_insert_select_flow
+INSERT INTO users (id, name) VALUES (1, 'alice');
+```
+
+```sql test: select_aggregates
+INSERT INTO t (id, val) VALUES (1, 10), (2, 20), (3, 30);
+```
+
+```sql test: select_group_by_aggregates
+INSERT INTO sales (region, product, amount) VALUES 
+  ('east', 'A', 10), 
+  ('east', 'A', 20), 
+  ('east', 'B', 30),
+  ('west', 'A', 40), 
+  ('west', 'B', 50), 
+  ('west', 'B', 60);
+```
+
+### Implementation Notes
+
+- Column list must match value count
+- Values aligned by position (schema order or column list order)
+- Type coercion performed automatically where possible
+- All inserts persisted to WAL and memtable
+
+<Warning>
+Datacave does not support:
+- `INSERT ... SELECT` (subquery inserts)
+- `ON CONFLICT` / `UPSERT`
+- `RETURNING` clause
+- Default values (all columns must be specified)
+</Warning>
+
+## UPDATE
+
+Modify existing rows in a table, optionally filtered by a WHERE clause.
+
+### Syntax
+
+```sql
+UPDATE table_name 
+SET column = value [, ...] 
+[WHERE condition];
+```
+
+### Features
+
+- **Single-table**: One table per UPDATE statement
+- **Multiple columns**: Set multiple columns in one statement
+- **WHERE clause**: Filter which rows to update (see [WHERE reference](/sql/queries#where-clauses))
+
+### Examples
+
+<CodeGroup>
+```sql Update All Rows
+UPDATE users SET active = true;
+```
+
+```sql Update with WHERE
+UPDATE users SET name = 'Alice Smith' WHERE id = 1;
+```
+
+```sql Multiple Columns
+UPDATE products 
+SET price = 29.99, stock = 100 
+WHERE id = 42;
+```
+
+```sql Complex WHERE
+UPDATE orders 
+SET status = 'shipped' 
+WHERE user_id = 1 AND amount > 100;
+```
+</CodeGroup>
+
+### Test Examples
+
+```sql test: update_with_where
+UPDATE t SET val = 99 WHERE id = 2;
+-- Returns: 1 row affected
+```
+
+```sql test: update_with_where (AND)
+UPDATE t SET val = 77 WHERE id = 3 AND val = 30;
+-- Returns: 1 row affected
+```
+
+### Rows Affected
+
+UPDATE returns the count of rows modified:
+
+```rust
+// From test suite
+let result = executor.execute(&stmts[0], Some("t1")).await.expect("update");
+assert_eq!(result.rows_affected, 1);
+```
+
+### Implementation Notes
+
+- WHERE clause matches rows using column-literal predicates
+- Only matching rows are updated
+- Without WHERE, all rows are updated
+- Updates applied to LSM storage (create new version, tombstone old)
+
+<Warning>
+Datacave does not support:
+- Multi-table UPDATE
+- `UPDATE ... FROM` (joins)
+- Subqueries in SET or WHERE
+- `RETURNING` clause
+</Warning>
+
+## DELETE
+
+Remove rows from a table, optionally filtered by a WHERE clause.
+
+### Syntax
+
+```sql
+DELETE FROM table_name [WHERE condition];
+```
+
+### Features
+
+- **Single-table**: One table per DELETE statement
+- **WHERE clause**: Filter which rows to delete
+- **Rows affected**: Returns count of deleted rows
+
+### Examples
+
+<CodeGroup>
+```sql Delete All Rows
+DELETE FROM users;
+```
+
+```sql Delete with WHERE
+DELETE FROM users WHERE id = 2;
+```
+
+```sql Delete with AND
+DELETE FROM orders WHERE user_id = 1 AND status = 'cancelled';
+```
+
+```sql Delete with OR
+DELETE FROM logs WHERE level = 'debug' OR created_at < '2024-01-01';
+```
+</CodeGroup>
+
+### Test Examples
+
+```sql test: delete_with_where
+DELETE FROM t WHERE id = 2;
+-- Returns: 1 row affected
+```
+
+```sql test: delete_with_where (text comparison)
+DELETE FROM t WHERE name = 'c';
+-- Returns: 1 row affected
+```
+
+```sql test: delete_with_where (OR)
+DELETE FROM t WHERE id = 1 OR id = 6;
+-- Returns: 2 rows affected
+```
+
+### Rows Affected
+
+DELETE returns the count of rows removed:
+
+```rust
+// From test suite
+let result = executor.execute(&stmts[0], Some("t1")).await.expect("delete");
+assert_eq!(result.rows_affected, 1);
+```
+
+### Implementation Notes
+
+- WHERE clause uses same predicates as SELECT (see [WHERE reference](/sql/queries#where-clauses))
+- Deleted rows marked with tombstones in LSM storage
+- Tombstones removed during compaction
+- Without WHERE, all rows are deleted
+
+<Warning>
+Datacave does not support:
+- `DELETE ... USING` (joins)
+- Subqueries in WHERE
+- `RETURNING` clause
+- `TRUNCATE TABLE` (use `DELETE FROM table` instead)
+</Warning>
+
+## Transaction Support
+
+DML statements can be wrapped in transactions:
+
+```sql
+BEGIN;
+INSERT INTO accounts (id, balance) VALUES (1, 1000);
+UPDATE accounts SET balance = balance - 100 WHERE id = 1;
+COMMIT;
+```
+
+<Warning>
+`BEGIN`, `COMMIT`, and `ROLLBACK` are accepted and buffer mutating statements until COMMIT, but **multi-statement atomicity and isolation are not guaranteed**.
+</Warning>
+
+### Transaction Behavior
+
+| Command | Behavior |
+|---------|----------|
+| `BEGIN` | Enters transaction mode; ReadyForQuery returns `T` |
+| `COMMIT` | Executes buffered statements; returns to `Idle` |
+| `ROLLBACK` | Discards buffer; returns to `Idle` |
+
+See the [Compatibility Matrix](/sql/compatibility#transaction-control) for details.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Query Data" icon="magnifying-glass" href="/sql/queries">
+    SELECT statements and filtering
+  </Card>
+  <Card title="Joins" icon="link" href="/sql/joins">
+    Multi-table queries
+  </Card>
+</CardGroup>

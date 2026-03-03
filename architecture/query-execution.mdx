@@ -1,0 +1,625 @@
+---
+title: Query Execution
+description: SQL parsing, query planning, and execution pipeline in Datacave
+---
+
+Datacave's SQL layer transforms PostgreSQL-compatible SQL statements into execution plans and executes them against the LSM storage engine. The pipeline consists of three main stages: parsing, planning, and execution.
+
+## Query Pipeline
+
+```
+┌─────────────────┐
+│   SQL String    │
+│ SELECT * FROM t │
+└────────┬────────┘
+         │
+         ▼ Parser (sqlparser-rs)
+┌─────────────────┐
+│   AST (Abstract │
+│  Syntax Tree)   │
+└────────┬────────┘
+         │
+         ▼ Planner
+┌─────────────────┐
+│  Execution Plan │
+│   (SelectPlan)  │
+└────────┬────────┘
+         │
+         ▼ Executor
+┌─────────────────┐
+│   SQL Result    │
+│  (rows + cols)  │
+└─────────────────┘
+```
+
+## SQL Parser
+
+Datacave uses the `sqlparser-rs` library with PostgreSQL dialect:
+
+```rust filename="datacave-sql/src/parser.rs:1-10" showLineNumbers
+use anyhow::Result;
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::parser::Parser;
+use sqlparser::ast::Statement;
+
+pub fn parse_sql(sql: &str) -> Result<Vec<Statement>> {
+    let dialect = PostgreSqlDialect {};
+    let statements = Parser::parse_sql(&dialect, sql)?;
+    Ok(statements)
+}
+```
+
+### Supported Statements
+
+<AccordionGroup>
+  <Accordion title="DDL - CREATE TABLE" icon="table">
+    ```sql
+    CREATE TABLE users (
+        id BIGINT PRIMARY KEY,
+        name TEXT,
+        email TEXT,
+        active BOOLEAN
+    )
+    ```
+    
+    Parsed into `Statement::CreateTable` with columns and constraints.
+  </Accordion>
+
+  <Accordion title="DML - INSERT" icon="plus">
+    ```sql
+    INSERT INTO users (id, name, email, active)
+    VALUES (1, 'Alice', 'alice@example.com', true)
+    ```
+    
+    Supports multi-row inserts and column lists.
+  </Accordion>
+
+  <Accordion title="DQL - SELECT" icon="magnifying-glass">
+    ```sql
+    SELECT u.name, COUNT(*) as order_count
+    FROM users u
+    INNER JOIN orders o ON u.id = o.user_id
+    WHERE u.active = true
+    GROUP BY u.name
+    HAVING COUNT(*) > 5
+    ORDER BY order_count DESC
+    LIMIT 10 OFFSET 5
+    ```
+    
+    Full support for projections, joins, aggregations, filtering, ordering.
+  </Accordion>
+
+  <Accordion title="DML - UPDATE" icon="pen">
+    ```sql
+    UPDATE users
+    SET active = false
+    WHERE id = 1
+    ```
+  </Accordion>
+
+  <Accordion title="DML - DELETE" icon="trash">
+    ```sql
+    DELETE FROM users
+    WHERE active = false
+    ```
+  </Accordion>
+
+  <Accordion title="Transactions" icon="code-branch">
+    ```sql
+    BEGIN;
+    INSERT INTO users VALUES (...);
+    COMMIT;
+    -- or ROLLBACK;
+    ```
+    
+    Basic transaction support (buffered until COMMIT).
+  </Accordion>
+</AccordionGroup>
+
+## Query Planner
+
+The planner converts AST nodes into execution plans:
+
+```rust filename="datacave-sql/src/planner.rs:8-18" showLineNumbers
+#[derive(Debug, Clone)]
+pub enum Plan {
+    CreateTable(CreateTablePlan),
+    Insert(InsertPlan),
+    Select(SelectPlan),
+    Update(UpdatePlan),
+    Delete(DeletePlan),
+    Begin(BeginPlan),
+    Commit(CommitPlan),
+    Rollback(RollbackPlan),
+}
+```
+
+### SELECT Plan Structure
+
+```rust filename="datacave-sql/src/planner.rs:133-147" showLineNumbers
+#[derive(Debug, Clone)]
+pub struct SelectPlan {
+    pub table: String,
+    pub joins: Vec<JoinSpec>,
+    pub projection: Vec<ProjectionItem>,
+    /// WHERE clause (optional)
+    pub where_clause: Option<WhereCond>,
+    /// Column names for GROUP BY (empty when no GROUP BY)
+    pub group_by: Vec<String>,
+    /// HAVING condition (only when GROUP BY present)
+    pub having: Option<HavingCond>,
+    pub order_by: Vec<OrderBySpec>,
+    pub limit: Option<u64>,
+    pub offset: Option<u64>,
+}
+```
+
+### Projection Items
+
+```rust filename="datacave-sql/src/planner.rs:34-39" showLineNumbers
+#[derive(Debug, Clone)]
+pub enum ProjectionItem {
+    Column(String, Option<String>), // (name, output_alias)
+    Aggregate(AggregateFunc, Option<String>, Option<String>), // (func, arg_col, alias)
+    AllColumns,
+}
+```
+
+### WHERE Clause Planning
+
+WHERE conditions support complex predicates:
+
+```rust filename="datacave-sql/src/planner.rs:125-131" showLineNumbers
+#[derive(Debug, Clone)]
+pub enum WhereCond {
+    Predicate(WherePredicate),
+    And(Box<WhereCond>, Box<WhereCond>),
+    Or(Box<WhereCond>, Box<WhereCond>),
+}
+```
+
+Example planning:
+```sql
+WHERE (age > 18 AND status = 'active') OR vip = true
+```
+
+becomes:
+```rust
+WhereCond::Or(
+    Box::new(WhereCond::And(
+        Box::new(WhereCond::Predicate(age > 18)),
+        Box::new(WhereCond::Predicate(status = 'active'))
+    )),
+    Box::new(WhereCond::Predicate(vip = true))
+)
+```
+
+### JOIN Planning
+
+```rust filename="datacave-sql/src/planner.rs:102-108" showLineNumbers
+#[derive(Debug, Clone)]
+pub struct JoinSpec {
+    pub kind: JoinKind,
+    pub right_table: String,
+    pub left_column: String,
+    pub right_column: String,
+}
+```
+
+Supports:
+- **INNER JOIN**: returns only matching rows
+- **LEFT OUTER JOIN**: returns all left rows + matching right rows (nulls for non-matches)
+
+<Info>
+Join planning extracts equality conditions from `ON` clauses or `USING` specifications. Example: `ON users.id = orders.user_id` becomes `JoinSpec { left_column: "users.id", right_column: "user_id", ... }`.
+</Info>
+
+## Query Executor
+
+The executor runs plans against the LSM storage engine:
+
+```rust filename="datacave-sql/src/executor.rs:15-21" showLineNumbers
+#[derive(Debug)]
+pub struct SqlExecutor {
+    catalog: Arc<Mutex<Catalog>>,
+    mvcc: Arc<MvccManager>,
+    storage: Arc<LsmEngine>,
+    table_seq: Arc<Mutex<HashMap<String, u64>>>,
+}
+```
+
+### Execution Entry Point
+
+```rust filename="datacave-sql/src/executor.rs:33-45" showLineNumbers
+pub async fn execute(&self, stmt: &Statement, tenant_id: Option<&str>) -> Result<SqlResult, DatacaveError> {
+    let plan = plan_statement(stmt).ok_or_else(|| DatacaveError::Sql("unsupported SQL".into()))?;
+    match plan {
+        Plan::CreateTable(plan) => self.exec_create_table(plan),
+        Plan::Insert(plan) => self.exec_insert(plan, tenant_id).await,
+        Plan::Select(plan) => self.exec_select(plan, tenant_id).await,
+        Plan::Update(plan) => self.exec_update(plan, tenant_id).await,
+        Plan::Delete(plan) => self.exec_delete(plan, tenant_id).await,
+        Plan::Begin(_) => self.exec_begin(),
+        Plan::Commit(_) => self.exec_commit(),
+        Plan::Rollback(_) => self.exec_rollback(),
+    }
+}
+```
+
+## SELECT Execution
+
+### Single-Table Query
+
+1. **Fetch rows** from storage with MVCC snapshot
+2. **Apply WHERE filter** (predicate evaluation)
+3. **Compute aggregations** (if present)
+4. **Apply projection** (select columns)
+5. **Order and limit** results
+
+```rust filename="datacave-sql/src/executor.rs:128-186" showLineNumbers
+async fn exec_select(
+    &self,
+    plan: crate::planner::SelectPlan,
+    tenant_id: Option<&str>,
+) -> Result<SqlResult, DatacaveError> {
+    let snapshot = self.mvcc.snapshot();
+
+    if !plan.joins.is_empty() {
+        return self.exec_select_join(&plan, tenant_id, snapshot.version).await;
+    }
+
+    let rows = self
+        .fetch_table_rows(&plan.table, tenant_id, snapshot.version)
+        .await?;
+    let schema = self
+        .catalog
+        .lock()
+        .unwrap()
+        .get_table(&plan.table)
+        .cloned()
+        .ok_or_else(|| DatacaveError::Sql(format!("unknown table: {}", plan.table)))?;
+
+    let rows = filter_rows_by_where(rows, plan.where_clause.as_ref(), &schema.columns);
+
+    let has_aggregates = plan
+        .projection
+        .iter()
+        .any(|p| matches!(p, ProjectionItem::Aggregate(_, _, _)));
+    let (columns, result_rows) = if has_aggregates {
+        if plan.group_by.is_empty() {
+            let (cols, agg_row) =
+                compute_aggregates(&plan.projection, &schema.columns, &rows)?;
+            (cols, vec![agg_row])
+        } else {
+            compute_grouped_aggregates(
+                &plan.projection,
+                &plan.group_by,
+                &schema.columns,
+                &rows,
+                plan.having.as_ref(),
+            )?
+        }
+    } else {
+        apply_projection(&plan.projection, &schema.columns, &rows)
+    };
+
+    let rows = apply_order_limit(
+        &columns,
+        result_rows,
+        &plan.order_by,
+        plan.limit,
+        plan.offset,
+    )?;
+    Ok(SqlResult {
+        columns,
+        rows,
+        rows_affected: 0,
+    })
+}
+```
+
+### WHERE Filtering
+
+```rust filename="datacave-sql/src/executor.rs:784-813" showLineNumbers
+fn evaluate_where(cond: &WhereCond, row: &DataRow, schema: &[Column]) -> bool {
+    match cond {
+        WhereCond::Predicate(p) => evaluate_where_predicate(p, row, schema),
+        WhereCond::And(left, right) => {
+            evaluate_where(left, row, schema) && evaluate_where(right, row, schema)
+        }
+        WhereCond::Or(left, right) => {
+            evaluate_where(left, row, schema) || evaluate_where(right, row, schema)
+        }
+    }
+}
+
+fn evaluate_where_predicate(p: &WherePredicate, row: &DataRow, schema: &[Column]) -> bool {
+    let left_val = where_operand_value(&p.left, row, schema);
+    let right_val = where_operand_value(&p.right, row, schema);
+    match p.op {
+        HavingOp::Eq => left_val == right_val,
+        HavingOp::NotEq => left_val != right_val,
+        HavingOp::Gt => cmp_data_value(&left_val, &right_val) == std::cmp::Ordering::Greater,
+        HavingOp::Gte => {
+            let o = cmp_data_value(&left_val, &right_val);
+            o == std::cmp::Ordering::Greater || o == std::cmp::Ordering::Equal
+        }
+        HavingOp::Lt => cmp_data_value(&left_val, &right_val) == std::cmp::Ordering::Less,
+        HavingOp::Lte => {
+            let o = cmp_data_value(&left_val, &right_val);
+            o == std::cmp::Ordering::Less || o == std::cmp::Ordering::Equal
+        }
+    }
+}
+```
+
+### Aggregation (GROUP BY)
+
+Grouped aggregation:
+
+1. **Hash rows by group columns** into buckets
+2. **Compute aggregates** per group (COUNT, SUM, AVG, MIN, MAX)
+3. **Apply HAVING filter** to groups
+4. **Build result rows** with group columns + aggregates
+
+```rust filename="datacave-sql/src/executor.rs:509-519" showLineNumbers
+let mut groups: HashMap<Vec<u8>, Vec<DataRow>> = HashMap::new();
+for row in rows {
+    let key_values: Vec<DataValue> = group_indices
+        .iter()
+        .filter_map(|&i| row.values.get(i).cloned())
+        .collect();
+    let key = bincode::serialize(&key_values)
+        .map_err(|e| DatacaveError::Sql(format!("serialize group key: {}", e)))?;
+    groups.entry(key).or_default().push(row.clone());
+}
+```
+
+### JOIN Execution
+
+Nested loop join algorithm:
+
+1. **Fetch left table rows**
+2. **For each left row**, scan right table for matching rows
+3. **Concatenate matching rows** into result
+4. **For LEFT OUTER**, emit left row + nulls if no match
+
+```rust filename="datacave-sql/src/executor.rs:245-260" showLineNumbers
+for left_row in &joined_rows {
+    let mut matched = false;
+    for right_row in &right_rows {
+        if left_row.values.get(left_col_idx) == right_row.values.get(right_col_idx) {
+            let mut values = left_row.values.clone();
+            values.extend(right_row.values.iter().cloned());
+            new_rows.push(DataRow { values });
+            matched = true;
+        }
+    }
+    if join.kind == JoinKind::LeftOuter && !matched {
+        let mut values = left_row.values.clone();
+        values.extend(right_null_row.iter().cloned());
+        new_rows.push(DataRow { values });
+    }
+}
+```
+
+<Warning>
+Join performance is O(n × m) for nested loop. Future optimizations: hash joins, index lookups.
+</Warning>
+
+## INSERT Execution
+
+1. **Validate table schema** from catalog
+2. **Align column values** to schema order
+3. **Assign row ID** (auto-increment per table)
+4. **Serialize row** with bincode
+5. **Write to LSM** with MVCC version
+
+```rust filename="datacave-sql/src/executor.rs:70-102" showLineNumbers
+async fn exec_insert(
+    &self,
+    plan: crate::planner::InsertPlan,
+    tenant_id: Option<&str>,
+) -> Result<SqlResult, DatacaveError> {
+    let schema = self
+        .catalog
+        .lock()
+        .unwrap()
+        .get_table(&plan.table)
+        .cloned()
+        .ok_or_else(|| DatacaveError::Sql(format!("unknown table: {}", plan.table)))?;
+
+    let mut rows_affected = 0;
+    for row in plan.values {
+        let values = align_columns(&schema.columns, &plan.columns, row);
+        let row_id = self.reserve_row_id(&plan.table, tenant_id);
+        let key = encode_row_key(&plan.table, row_id, tenant_id);
+        let value = bincode::serialize(&DataRow { values })
+            .map_err(|e| DatacaveError::Storage(e.to_string()))?;
+        let version = self.mvcc.next_version();
+        self.storage
+            .put(&key, &value, version)
+            .await
+            .map_err(|e| DatacaveError::Storage(e.to_string()))?;
+        rows_affected += 1;
+    }
+    Ok(SqlResult {
+        columns: Vec::new(),
+        rows: Vec::new(),
+        rows_affected,
+    })
+}
+```
+
+### Row Key Encoding
+
+```rust filename="datacave-sql/src/executor.rs:444-454" showLineNumbers
+fn encode_row_key(table: &str, row_id: u64, tenant_id: Option<&str>) -> Vec<u8> {
+    let mut out = Vec::new();
+    if let Some(tenant) = tenant_id {
+        out.extend_from_slice(tenant.as_bytes());
+        out.push(b'|');
+    }
+    out.extend_from_slice(table.as_bytes());
+    out.push(b'|');
+    out.extend_from_slice(&row_id.to_be_bytes());
+    out
+}
+```
+
+Format: `[tenant|]table|row_id` (e.g., `users|0000000000000001`)
+
+## UPDATE Execution
+
+1. **Scan all rows** for table with MVCC snapshot
+2. **Apply WHERE filter** to find matching rows
+3. **Update column values** in-place
+4. **Serialize and write** new version to LSM
+
+```rust filename="datacave-sql/src/executor.rs:354-373" showLineNumbers
+if let Some(ref cond) = plan.where_clause {
+    if !evaluate_where(cond, &row, &schema.columns) {
+        continue;
+    }
+}
+for (col, val) in &plan.assignments {
+    if let Some(idx) = schema.columns.iter().position(|c| c.name == *col) {
+        if idx < row.values.len() {
+            row.values[idx] = val.clone();
+        }
+    }
+}
+let updated = bincode::serialize(&row)
+    .map_err(|e| DatacaveError::Storage(e.to_string()))?;
+let version = self.mvcc.next_version();
+self.storage
+    .put(&key, &updated, version)
+    .await
+    .map_err(|e| DatacaveError::Storage(e.to_string()))?;
+rows_affected += 1;
+```
+
+## DELETE Execution
+
+1. **Scan all rows** for table
+2. **Apply WHERE filter**
+3. **Call storage.delete()** with MVCC version (writes tombstone)
+
+```rust filename="datacave-sql/src/executor.rs:407-419" showLineNumbers
+if let Some(ref cond) = plan.where_clause {
+    let row: DataRow =
+        bincode::deserialize(&bytes).map_err(|e| DatacaveError::Storage(e.to_string()))?;
+    if !evaluate_where(cond, &row, &schema.columns) {
+        continue;
+    }
+}
+let version = self.mvcc.next_version();
+self.storage
+    .delete(&key, version)
+    .await
+    .map_err(|e| DatacaveError::Storage(e.to_string()))?;
+rows_affected += 1;
+```
+
+## Supported Aggregate Functions
+
+```rust filename="datacave-sql/src/planner.rs:87-94" showLineNumbers
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AggregateFunc {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+}
+```
+
+<CardGroup cols={2}>
+  <Card title="COUNT(*)" icon="hashtag">
+    Counts all rows in group (or total if no GROUP BY)
+  </Card>
+  <Card title="SUM(column)" icon="plus">
+    Sums numeric values, ignoring NULLs
+  </Card>
+  <Card title="AVG(column)" icon="calculator">
+    Average of numeric values
+  </Card>
+  <Card title="MIN/MAX(column)" icon="arrow-up-arrow-down">
+    Minimum/maximum value in group
+  </Card>
+</CardGroup>
+
+## Ordering and Limiting
+
+```rust filename="datacave-sql/src/executor.rs:743-772" showLineNumbers
+if !order_by.is_empty() {
+    rows.sort_by(|a, b| {
+        for spec in order_by {
+            let (idx, asc) = match &spec.spec {
+                OrderBySpecKind::ColumnOrAlias(name) => {
+                    let i = schema_resolve_column_index(columns, name);
+                    match i {
+                        Some(i) => (i, spec.asc),
+                        None => continue,
+                    }
+                }
+                OrderBySpecKind::Position(pos) => {
+                    let i = pos.saturating_sub(1);
+                    if i < columns.len() {
+                        (i, spec.asc)
+                    } else {
+                        continue;
+                    }
+                }
+            };
+            let a_val = a.values.get(idx).unwrap_or(&DataValue::Null);
+            let b_val = b.values.get(idx).unwrap_or(&DataValue::Null);
+            let o = cmp_data_value(a_val, b_val);
+            if o != std::cmp::Ordering::Equal {
+                return if asc { o } else { o.reverse() };
+            }
+        }
+        std::cmp::Ordering::Equal
+    });
+}
+```
+
+Supports:
+- Column name: `ORDER BY name`
+- 1-based position: `ORDER BY 1`
+- ASC/DESC: `ORDER BY age DESC`
+- Multiple columns: `ORDER BY status, created_at DESC`
+
+## Performance Considerations
+
+<AccordionGroup>
+  <Accordion title="Full Table Scans" icon="magnifying-glass">
+    All queries currently perform full table scans. Future optimization: secondary indexes.
+  </Accordion>
+
+  <Accordion title="Nested Loop Joins" icon="link">
+    O(n × m) complexity. Future optimization: hash joins, sort-merge joins.
+  </Accordion>
+
+  <Accordion title="In-Memory Aggregation" icon="memory">
+    GROUP BY loads all groups into memory. Future: spill to disk for large groups.
+  </Accordion>
+
+  <Accordion title="MVCC Snapshot Isolation" icon="camera">
+    Each query gets consistent snapshot without blocking writes.
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Storage Engine" icon="database" href="/architecture/storage-engine">
+    Understand the LSM engine powering query execution
+  </Card>
+  <Card title="Wire Protocol" icon="network-wired" href="/architecture/wire-protocol">
+    Learn how queries arrive via PostgreSQL protocol
+  </Card>
+  <Card title="SQL Compatibility" icon="check" href="/reference/sql-compatibility">
+    Full compatibility matrix for SQL features
+  </Card>
+</CardGroup>

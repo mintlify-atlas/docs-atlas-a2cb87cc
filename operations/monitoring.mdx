@@ -1,0 +1,620 @@
+---
+title: Monitoring
+description: Metrics endpoints, health checks, readiness probes, and Prometheus integration for observability
+---
+
+## Overview
+
+Datacave provides comprehensive observability through:
+
+- **Metrics endpoint**: Prometheus-compatible metrics at `/metrics`
+- **Health checks**: Liveness probe at `/health`
+- **Readiness probes**: Ready-to-serve indicator at `/ready`
+
+All observability endpoints are served on the metrics address configured in `config.toml`.
+
+## Configuration
+
+Configure the metrics endpoint in your `config.toml`:
+
+```toml
+[metrics]
+listen_addr = "127.0.0.1:9898"
+```
+
+<ParamField path="metrics.listen_addr" type="string" default="127.0.0.1:9898">
+  Address and port for the metrics HTTP server. Use `0.0.0.0:9898` to expose externally.
+</ParamField>
+
+<Warning>
+  Metrics endpoints expose operational data. Restrict access using firewall rules or run on a private network.
+</Warning>
+
+## Endpoints
+
+### Metrics Endpoint
+
+**GET /metrics**
+
+Returns Prometheus-formatted metrics.
+
+```bash
+curl http://127.0.0.1:9898/metrics
+```
+
+**Example output:**
+
+```
+# HELP datacave_queries_total Total number of queries executed
+# TYPE datacave_queries_total counter
+datacave_queries_total{query_type="select"} 1523
+datacave_queries_total{query_type="insert"} 892
+datacave_queries_total{query_type="update"} 234
+datacave_queries_total{query_type="delete"} 45
+
+# HELP datacave_connections_active Number of active client connections
+# TYPE datacave_connections_active gauge
+datacave_connections_active 12
+
+# HELP datacave_query_duration_seconds Query execution duration
+# TYPE datacave_query_duration_seconds histogram
+datacave_query_duration_seconds_bucket{le="0.001"} 523
+datacave_query_duration_seconds_bucket{le="0.01"} 1245
+datacave_query_duration_seconds_bucket{le="0.1"} 2341
+datacave_query_duration_seconds_bucket{le="1.0"} 2689
+datacave_query_duration_seconds_bucket{le="+Inf"} 2694
+
+# HELP datacave_storage_memtable_bytes Current memtable size in bytes
+# TYPE datacave_storage_memtable_bytes gauge
+datacave_storage_memtable_bytes{shard="0"} 12582912
+datacave_storage_memtable_bytes{shard="1"} 15728640
+
+# HELP datacave_storage_sstable_count Number of SSTable files
+# TYPE datacave_storage_sstable_count gauge
+datacave_storage_sstable_count{shard="0"} 23
+datacave_storage_sstable_count{shard="1"} 19
+
+# HELP datacave_storage_compaction_duration_seconds Compaction duration
+# TYPE datacave_storage_compaction_duration_seconds histogram
+datacave_storage_compaction_duration_seconds_bucket{le="1.0"} 45
+datacave_storage_compaction_duration_seconds_bucket{le="5.0"} 123
+datacave_storage_compaction_duration_seconds_bucket{le="10.0"} 145
+datacave_storage_compaction_duration_seconds_bucket{le="+Inf"} 147
+```
+
+### Health Endpoint
+
+**GET /health**
+
+Liveness probe indicating the server process is running.
+
+```bash
+curl http://127.0.0.1:9898/health
+```
+
+**Response:**
+
+```json
+{
+  "status": "healthy",
+  "timestamp": "2026-03-03T10:15:30Z"
+}
+```
+
+**HTTP Status Codes:**
+- `200 OK`: Server is alive
+- `503 Service Unavailable`: Server is shutting down or unresponsive
+
+**Use case**: Kubernetes liveness probe to restart unhealthy pods.
+
+### Readiness Endpoint
+
+**GET /ready**
+
+Readiness probe indicating the server is ready to accept connections.
+
+```bash
+curl http://127.0.0.1:9898/ready
+```
+
+**Response:**
+
+```json
+{
+  "status": "ready",
+  "checks": {
+    "storage": "ok",
+    "cluster": "ok",
+    "replication": "ok"
+  },
+  "timestamp": "2026-03-03T10:15:30Z"
+}
+```
+
+**HTTP Status Codes:**
+- `200 OK`: Server is ready to serve traffic
+- `503 Service Unavailable`: Server is starting up, recovering, or degraded
+
+**Use case**: Kubernetes readiness probe to control load balancer traffic.
+
+## Available Metrics
+
+### Query Metrics
+
+<ResponseField name="datacave_queries_total" type="counter">
+  Total number of queries executed, labeled by `query_type` (select, insert, update, delete).
+</ResponseField>
+
+<ResponseField name="datacave_query_duration_seconds" type="histogram">
+  Query execution duration in seconds. Buckets: 0.001, 0.01, 0.1, 1.0, +Inf.
+</ResponseField>
+
+<ResponseField name="datacave_query_errors_total" type="counter">
+  Total number of query errors, labeled by `error_type`.
+</ResponseField>
+
+### Connection Metrics
+
+<ResponseField name="datacave_connections_active" type="gauge">
+  Current number of active client connections.
+</ResponseField>
+
+<ResponseField name="datacave_connections_total" type="counter">
+  Total number of client connections established.
+</ResponseField>
+
+<ResponseField name="datacave_connections_rejected_total" type="counter">
+  Number of connections rejected due to max_connections limit.
+</ResponseField>
+
+### Storage Metrics
+
+<ResponseField name="datacave_storage_memtable_bytes" type="gauge">
+  Current memtable size in bytes, labeled by `shard`.
+</ResponseField>
+
+<ResponseField name="datacave_storage_sstable_count" type="gauge">
+  Number of SSTable files, labeled by `shard`.
+</ResponseField>
+
+<ResponseField name="datacave_storage_sstable_bytes" type="gauge">
+  Total size of SSTable files in bytes, labeled by `shard`.
+</ResponseField>
+
+<ResponseField name="datacave_storage_wal_bytes" type="gauge">
+  Write-Ahead Log size in bytes, labeled by `shard`.
+</ResponseField>
+
+<ResponseField name="datacave_storage_compaction_duration_seconds" type="histogram">
+  Compaction duration in seconds. Buckets: 1, 5, 10, 30, 60, +Inf.
+</ResponseField>
+
+<ResponseField name="datacave_storage_compaction_total" type="counter">
+  Total number of compactions completed, labeled by `shard`.
+</ResponseField>
+
+### Cluster Metrics
+
+<ResponseField name="datacave_cluster_nodes_total" type="gauge">
+  Total number of nodes in the cluster.
+</ResponseField>
+
+<ResponseField name="datacave_cluster_nodes_healthy" type="gauge">
+  Number of healthy nodes in the cluster.
+</ResponseField>
+
+<ResponseField name="datacave_cluster_replication_lag_seconds" type="gauge">
+  Replication lag in seconds, labeled by `shard` and `replica`.
+</ResponseField>
+
+<ResponseField name="datacave_cluster_replication_bytes_total" type="counter">
+  Total bytes replicated, labeled by `shard`.
+</ResponseField>
+
+## Prometheus Integration
+
+### Prometheus Configuration
+
+Add Datacave as a scrape target in `prometheus.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: 'datacave'
+    static_configs:
+      - targets: ['localhost:9898']
+    scrape_interval: 15s
+    scrape_timeout: 10s
+```
+
+### Multi-Node Cluster
+
+For clustered deployments, scrape all nodes:
+
+```yaml
+scrape_configs:
+  - job_name: 'datacave-cluster'
+    static_configs:
+      - targets:
+        - 'datacave-node1:9898'
+        - 'datacave-node2:9898'
+        - 'datacave-node3:9898'
+        labels:
+          cluster: 'production'
+    scrape_interval: 15s
+```
+
+### Service Discovery
+
+Use Kubernetes service discovery:
+
+```yaml
+scrape_configs:
+  - job_name: 'datacave'
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names:
+            - datacave
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: datacave
+      - source_labels: [__meta_kubernetes_pod_container_port_name]
+        action: keep
+        regex: metrics
+```
+
+## Grafana Dashboards
+
+### Pre-built Dashboard
+
+Import the official Datacave Grafana dashboard:
+
+1. Download from: `https://github.com/yourusername/datacave/grafana/dashboard.json`
+2. In Grafana: **Dashboards → Import → Upload JSON file**
+
+### Key Panels
+
+<Tabs>
+  <Tab title="Query Performance">
+    **Metrics:**
+    - Query rate (QPS)
+    - Query latency (p50, p95, p99)
+    - Error rate
+    
+    **PromQL examples:**
+    ```promql
+    # Queries per second
+    rate(datacave_queries_total[5m])
+    
+    # P95 query latency
+    histogram_quantile(0.95, rate(datacave_query_duration_seconds_bucket[5m]))
+    
+    # Error rate
+    rate(datacave_query_errors_total[5m])
+    ```
+  </Tab>
+  
+  <Tab title="Storage Health">
+    **Metrics:**
+    - Memtable size
+    - SSTable count
+    - Compaction frequency
+    - Disk usage
+    
+    **PromQL examples:**
+    ```promql
+    # Memtable size by shard
+    datacave_storage_memtable_bytes
+    
+    # SSTable count by shard
+    datacave_storage_sstable_count
+    
+    # Compaction rate
+    rate(datacave_storage_compaction_total[5m])
+    ```
+  </Tab>
+  
+  <Tab title="Cluster Health">
+    **Metrics:**
+    - Node count
+    - Replication lag
+    - Network throughput
+    
+    **PromQL examples:**
+    ```promql
+    # Healthy nodes percentage
+    (datacave_cluster_nodes_healthy / datacave_cluster_nodes_total) * 100
+    
+    # Max replication lag
+    max(datacave_cluster_replication_lag_seconds)
+    
+    # Replication throughput
+    rate(datacave_cluster_replication_bytes_total[5m])
+    ```
+  </Tab>
+  
+  <Tab title="Connections">
+    **Metrics:**
+    - Active connections
+    - Connection rate
+    - Rejected connections
+    
+    **PromQL examples:**
+    ```promql
+    # Active connections
+    datacave_connections_active
+    
+    # Connection rate
+    rate(datacave_connections_total[5m])
+    
+    # Rejection rate
+    rate(datacave_connections_rejected_total[5m])
+    ```
+  </Tab>
+</Tabs>
+
+## Alerting Rules
+
+### Prometheus Alerting
+
+Configure alerts in `prometheus-alerts.yml`:
+
+```yaml
+groups:
+  - name: datacave
+    interval: 30s
+    rules:
+      # High query latency
+      - alert: HighQueryLatency
+        expr: histogram_quantile(0.95, rate(datacave_query_duration_seconds_bucket[5m])) > 1.0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High query latency detected"
+          description: "P95 query latency is {{ $value }}s"
+      
+      # High error rate
+      - alert: HighErrorRate
+        expr: rate(datacave_query_errors_total[5m]) > 10
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value }} errors/sec"
+      
+      # Connection pool exhausted
+      - alert: ConnectionPoolExhausted
+        expr: datacave_connections_active > 900
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Connection pool near capacity"
+          description: "Active connections: {{ $value }} (max: 1024)"
+      
+      # Large memtable
+      - alert: LargeMemtable
+        expr: datacave_storage_memtable_bytes > 60000000
+        for: 10m
+        labels:
+          severity: info
+        annotations:
+          summary: "Memtable size approaching threshold"
+          description: "Shard {{ $labels.shard }} memtable: {{ $value }} bytes"
+      
+      # Many SSTables
+      - alert: HighSStableCount
+        expr: datacave_storage_sstable_count > 50
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "SSTable count is high"
+          description: "Shard {{ $labels.shard }} has {{ $value }} SSTables. Compaction may be falling behind."
+      
+      # Cluster node down
+      - alert: ClusterNodeDown
+        expr: datacave_cluster_nodes_healthy < datacave_cluster_nodes_total
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Cluster node is down"
+          description: "{{ $value }} nodes are unhealthy"
+      
+      # High replication lag
+      - alert: HighReplicationLag
+        expr: datacave_cluster_replication_lag_seconds > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Replication lag is high"
+          description: "Shard {{ $labels.shard }} replica {{ $labels.replica }} lag: {{ $value }}s"
+```
+
+## Kubernetes Integration
+
+### Liveness Probe
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: datacave
+spec:
+  containers:
+  - name: datacave
+    image: datacave-server:latest
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 9898
+      initialDelaySeconds: 30
+      periodSeconds: 10
+      timeoutSeconds: 5
+      failureThreshold: 3
+```
+
+### Readiness Probe
+
+```yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: datacave
+spec:
+  containers:
+  - name: datacave
+    image: datacave-server:latest
+    readinessProbe:
+      httpGet:
+        path: /ready
+        port: 9898
+      initialDelaySeconds: 10
+      periodSeconds: 5
+      timeoutSeconds: 3
+      failureThreshold: 3
+```
+
+### ServiceMonitor (Prometheus Operator)
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: datacave
+  namespace: datacave
+spec:
+  selector:
+    matchLabels:
+      app: datacave
+  endpoints:
+  - port: metrics
+    interval: 15s
+    path: /metrics
+```
+
+## Logging
+
+Datacave logs to stdout/stderr with structured JSON output.
+
+### Log Levels
+
+```bash
+# Set log level via environment variable
+RUST_LOG=info datacave-server serve --config config.toml
+
+# Detailed logging
+RUST_LOG=debug datacave-server serve --config config.toml
+
+# Module-specific logging
+RUST_LOG=datacave_lsm=debug,datacave_sql=info datacave-server serve --config config.toml
+```
+
+### Log Aggregation
+
+Forward logs to centralized logging:
+
+<Tabs>
+  <Tab title="Filebeat">
+    ```yaml
+    # filebeat.yml
+    filebeat.inputs:
+      - type: log
+        enabled: true
+        paths:
+          - /var/log/datacave/*.log
+        json.keys_under_root: true
+        json.add_error_key: true
+    
+    output.elasticsearch:
+      hosts: ["elasticsearch:9200"]
+      index: "datacave-%{+yyyy.MM.dd}"
+    ```
+  </Tab>
+  
+  <Tab title="Fluentd">
+    ```
+    # fluentd.conf
+    <source>
+      @type tail
+      path /var/log/datacave/*.log
+      pos_file /var/log/datacave/datacave.log.pos
+      tag datacave
+      format json
+    </source>
+    
+    <match datacave>
+      @type elasticsearch
+      host elasticsearch
+      port 9200
+      index_name datacave
+      type_name _doc
+    </match>
+    ```
+  </Tab>
+  
+  <Tab title="Kubernetes">
+    ```yaml
+    apiVersion: v1
+    kind: Pod
+    metadata:
+      name: datacave
+      annotations:
+        fluentbit.io/parser: json
+    spec:
+      containers:
+      - name: datacave
+        image: datacave-server:latest
+    ```
+  </Tab>
+</Tabs>
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Metrics Retention" icon="clock">
+    - Store high-resolution metrics for 15 days
+    - Downsample to 5-minute resolution for long-term storage
+    - Retain 1-year history for trend analysis
+  </Card>
+  
+  <Card title="Alert Tuning" icon="bell">
+    - Set appropriate thresholds based on baseline
+    - Use `for:` clause to avoid alert flapping
+    - Implement escalation policies (info → warning → critical)
+  </Card>
+  
+  <Card title="Dashboard Organization" icon="chart-line">
+    - Separate dashboards for different roles (ops, dev, exec)
+    - Use templating for multi-cluster views
+    - Include runbook links in panel descriptions
+  </Card>
+  
+  <Card title="Security" icon="shield">
+    - Restrict metrics endpoint access
+    - Use authentication for Grafana
+    - Audit alert notification channels
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Performance Tuning" icon="gauge" href="/operations/performance">
+    Use metrics to identify performance bottlenecks
+  </Card>
+  <Card title="Troubleshooting" icon="wrench" href="/operations/troubleshooting">
+    Debug issues using logs and metrics
+  </Card>
+  <Card title="Backup & Recovery" icon="database" href="/operations/backup-recovery">
+    Monitor backup success and recovery metrics
+  </Card>
+  <Card title="Clustering" icon="server" href="/operations/clustering">
+    Monitor cluster health and replication
+  </Card>
+</CardGroup>

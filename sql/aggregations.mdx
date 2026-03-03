@@ -1,0 +1,533 @@
+---
+title: Aggregations Reference
+description: COUNT, SUM, AVG, MIN, MAX, GROUP BY, and HAVING clauses
+---
+
+Datacave supports aggregate functions for computing summary statistics over rows.
+
+## Aggregate Functions
+
+### COUNT
+
+Count rows or non-null values.
+
+#### Syntax
+
+```sql
+COUNT(*)
+COUNT(column_name)
+```
+
+#### Return Type
+
+`Int64`
+
+#### Examples
+
+<CodeGroup>
+```sql Count All Rows
+SELECT COUNT(*) FROM users;
+```
+
+```sql Count Non-Null Values
+SELECT COUNT(email) FROM users;
+-- Excludes rows where email IS NULL
+```
+
+```sql Count with Alias
+SELECT COUNT(*) AS total_users FROM users;
+```
+</CodeGroup>
+
+#### Test Example
+
+```sql test: select_aggregates
+-- Table t: (1, 10), (2, 20), (3, 30)
+SELECT COUNT(*) FROM t;
+-- Result: 3 (Int64)
+```
+
+### SUM
+
+Sum numeric values.
+
+#### Syntax
+
+```sql
+SUM(column_name)
+```
+
+#### Return Type
+
+`Float64`
+
+#### Examples
+
+```sql Total Amount
+SELECT SUM(amount) FROM orders;
+```
+
+```sql Sum with Alias
+SELECT SUM(price * quantity) AS total_revenue FROM line_items;
+```
+
+#### Test Example
+
+```sql test: select_aggregates
+-- Table t: (1, 10), (2, 20), (3, 30)
+SELECT SUM(val) FROM t;
+-- Result: 60.0 (Float64)
+```
+
+<Warning>
+SUM only works with numeric types (INT, BIGINT, FLOAT). Non-numeric columns will cause an error.
+</Warning>
+
+### AVG
+
+Compute average of numeric values.
+
+#### Syntax
+
+```sql
+AVG(column_name)
+```
+
+#### Return Type
+
+`Float64`
+
+#### Examples
+
+```sql Average Price
+SELECT AVG(price) FROM products;
+```
+
+```sql Average with WHERE
+SELECT AVG(amount) FROM orders WHERE status = 'completed';
+```
+
+#### Test Example
+
+```sql test: select_aggregates
+-- Table t: (1, 10), (2, 20), (3, 30)
+SELECT AVG(val) FROM t;
+-- Result: 20.0 (Float64)
+```
+
+### MIN and MAX
+
+Find minimum or maximum value.
+
+#### Syntax
+
+```sql
+MIN(column_name)
+MAX(column_name)
+```
+
+#### Return Type
+
+`Float64` for numeric columns
+
+#### Examples
+
+<CodeGroup>
+```sql Min and Max
+SELECT MIN(price), MAX(price) FROM products;
+```
+
+```sql With Aliases
+SELECT 
+  MIN(amount) AS min_order,
+  MAX(amount) AS max_order
+FROM orders;
+```
+</CodeGroup>
+
+#### Test Example
+
+```sql test: select_aggregates
+-- Table t: (1, 10), (2, 20), (3, 30)
+SELECT MIN(val), MAX(val) FROM t;
+-- Result: 10.0, 30.0 (both Float64)
+```
+
+<Info>
+MIN and MAX exclude NULL values. For numeric types, results are returned as Float64.
+</Info>
+
+## Multiple Aggregates
+
+Combine multiple aggregate functions in one query:
+
+```sql test: select_group_by_aggregates
+SELECT 
+  region,
+  COUNT(*) AS order_count,
+  SUM(amount) AS total,
+  AVG(amount) AS average,
+  MIN(amount) AS min_amount,
+  MAX(amount) AS max_amount
+FROM sales
+GROUP BY region;
+```
+
+## GROUP BY
+
+Group rows by one or more columns and compute aggregates per group.
+
+### Syntax
+
+```sql
+SELECT column_list, aggregate_functions
+FROM table_name
+GROUP BY column_list;
+```
+
+### Examples
+
+<CodeGroup>
+```sql Single Column
+SELECT region, COUNT(*), SUM(amount)
+FROM sales
+GROUP BY region;
+```
+
+```sql Multiple Columns
+SELECT region, product, COUNT(*), SUM(amount)
+FROM sales
+GROUP BY region, product;
+```
+
+```sql With WHERE
+SELECT status, COUNT(*)
+FROM orders
+WHERE created_at > '2024-01-01'
+GROUP BY status;
+```
+</CodeGroup>
+
+### Test Example
+
+```sql test: select_group_by_aggregates
+-- sales(region, product, amount):
+-- ('east', 'A', 10), ('east', 'A', 20), ('east', 'B', 30),
+-- ('west', 'A', 40), ('west', 'B', 50), ('west', 'B', 60)
+
+-- GROUP BY region: 2 groups
+SELECT region, COUNT(*), SUM(amount), AVG(amount), MIN(amount), MAX(amount)
+FROM sales
+GROUP BY region;
+
+-- Result:
+-- 'east': count=3, sum=60.0, avg=20.0, min=10.0, max=30.0
+-- 'west': count=3, sum=150.0, avg=50.0, min=40.0, max=60.0
+
+-- GROUP BY region, product: 4 groups
+SELECT region, product, COUNT(*), SUM(amount)
+FROM sales
+GROUP BY region, product;
+
+-- Result: (east/A), (east/B), (west/A), (west/B)
+```
+
+### Implementation Notes
+
+- **Single-table or joined**: GROUP BY works on single tables or join results
+- **Column names**: GROUP BY columns must appear in SELECT list or be aggregated
+- **Execution order**: WHERE → GROUP BY → HAVING → SELECT → ORDER BY
+
+<Warning>
+`GROUP BY ALL` is **not supported**. You must explicitly list grouping columns.
+</Warning>
+
+## HAVING
+
+Filter groups after aggregation (like WHERE, but for groups).
+
+### Syntax
+
+```sql
+SELECT column_list, aggregate_functions
+FROM table_name
+GROUP BY column_list
+HAVING condition;
+```
+
+### Supported Conditions
+
+- **Column vs literal**: `region = 'west'`
+- **Alias vs literal**: `total > 100`
+- **Aggregate vs literal**: `COUNT(*) > 2`, `SUM(amount) >= 100`
+- **Boolean logic**: `AND`, `OR`
+- **Literal order**: `100 <= SUM(amount)` (literal can be on left)
+
+### Examples
+
+<CodeGroup>
+```sql Filter by Group Column
+SELECT region, COUNT(*), SUM(amount)
+FROM sales
+GROUP BY region
+HAVING region = 'west';
+```
+
+```sql Filter by Aggregate
+SELECT region, SUM(amount)
+FROM sales
+GROUP BY region
+HAVING SUM(amount) >= 100;
+```
+
+```sql Multiple Conditions
+SELECT region, COUNT(*), SUM(amount)
+FROM sales
+GROUP BY region
+HAVING COUNT(*) > 2 AND SUM(amount) >= 100;
+```
+
+```sql Inequality
+SELECT region, SUM(amount)
+FROM sales
+GROUP BY region
+HAVING region != 'east';
+```
+</CodeGroup>
+
+### Test Examples
+
+```sql test: select_group_by_having
+-- sales: east (3 rows, sum=60), west (3 rows, sum=150)
+
+-- HAVING region = 'west'
+SELECT region, COUNT(*), SUM(amount)
+FROM sales
+GROUP BY region
+HAVING region = 'west';
+-- Result: 1 row (west)
+
+-- HAVING COUNT(*) > 2
+SELECT region, COUNT(*), SUM(amount)
+FROM sales
+GROUP BY region
+HAVING COUNT(*) > 2;
+-- Result: 2 rows (both east and west have 3 rows)
+
+-- HAVING SUM(amount) >= 100
+SELECT region, SUM(amount)
+FROM sales
+GROUP BY region
+HAVING SUM(amount) >= 100;
+-- Result: 1 row (west=150; east=60 filtered out)
+
+-- HAVING COUNT(*) > 2 AND SUM(amount) >= 100
+SELECT region, COUNT(*), SUM(amount)
+FROM sales
+GROUP BY region
+HAVING COUNT(*) > 2 AND SUM(amount) >= 100;
+-- Result: 1 row (west only; east has count>2 but sum<100)
+
+-- HAVING with literal on left: 100 <= SUM(amount)
+SELECT region, SUM(amount)
+FROM sales
+GROUP BY region
+HAVING 100 <= SUM(amount);
+-- Result: 1 row (west)
+```
+
+### HAVING vs WHERE
+
+| Clause | Filters | Applied | Can Reference |
+|--------|---------|---------|---------------|
+| WHERE | Rows | Before grouping | Table columns |
+| HAVING | Groups | After aggregation | Group columns, aggregates |
+
+```sql WHERE and HAVING Together
+SELECT region, COUNT(*)
+FROM sales
+WHERE amount > 20          -- Filter rows before grouping
+GROUP BY region
+HAVING COUNT(*) > 1;       -- Filter groups after aggregation
+```
+
+<Info>
+HAVING **requires GROUP BY**. It cannot be used without grouping.
+</Info>
+
+## Aggregates on Joined Rows
+
+Apply aggregates to the result of a join.
+
+### Examples
+
+```sql COUNT on Join
+SELECT COUNT(*)
+FROM orders
+INNER JOIN users ON orders.user_id = users.id;
+-- Counts joined rows
+```
+
+```sql SUM on Join
+SELECT SUM(orders.amount)
+FROM orders
+INNER JOIN users ON orders.user_id = users.id;
+```
+
+```sql Join + GROUP BY
+SELECT users.name, COUNT(*), SUM(orders.amount)
+FROM orders
+INNER JOIN users ON orders.user_id = users.id
+GROUP BY users.name;
+```
+
+### Join + GROUP BY + HAVING
+
+```sql test: select_join_group_by_having
+-- users: (1, 'alice'), (2, 'bob'), (3, 'carol')
+-- orders: (1, 1, 100), (2, 1, 200), (3, 2, 50), (4, 3, 75)
+
+SELECT users.name, SUM(orders.amount)
+FROM orders
+INNER JOIN users ON orders.user_id = users.id
+GROUP BY users.name
+HAVING SUM(orders.amount) >= 100;
+
+-- Result:
+-- alice: 300 (100+200)
+-- bob and carol filtered by HAVING (50 and 75 < 100)
+```
+
+### Execution Order
+
+1. **JOIN**: Combine tables
+2. **WHERE**: Filter joined rows (if present)
+3. **GROUP BY**: Group joined result
+4. **HAVING**: Filter groups
+5. **SELECT**: Project aggregates
+6. **ORDER BY**: Sort (if present)
+7. **LIMIT/OFFSET**: Paginate (if present)
+
+## Aggregates with ORDER BY and LIMIT
+
+Sort and paginate aggregate results:
+
+```sql test: select_order_by_limit_with_aggregates
+-- sales(region, amount): ('east', 60), ('west', 150), ('north', 80)
+
+SELECT region, SUM(amount) AS total
+FROM sales
+GROUP BY region
+ORDER BY total DESC
+LIMIT 2;
+
+-- Result:
+-- west: 150.0
+-- north: 80.0
+-- (east filtered by LIMIT)
+```
+
+### Ordering by Alias
+
+ORDER BY can reference aggregate aliases:
+
+```sql
+SELECT region, SUM(amount) AS total
+FROM sales
+GROUP BY region
+ORDER BY total DESC;  -- Use alias
+```
+
+Equivalent to:
+
+```sql
+ORDER BY SUM(amount) DESC;  -- Use aggregate expression
+```
+
+## Complete Aggregation Examples
+
+### Single Table Aggregation
+
+```sql
+SELECT 
+  status,
+  COUNT(*) AS order_count,
+  SUM(amount) AS total_revenue,
+  AVG(amount) AS avg_order_value,
+  MIN(amount) AS smallest_order,
+  MAX(amount) AS largest_order
+FROM orders
+WHERE created_at >= '2024-01-01'
+GROUP BY status
+HAVING COUNT(*) > 10
+ORDER BY total_revenue DESC;
+```
+
+### Multi-Column Grouping
+
+```sql
+SELECT 
+  region,
+  product,
+  COUNT(*) AS sales_count,
+  SUM(amount) AS total_sales
+FROM sales
+GROUP BY region, product
+HAVING SUM(amount) > 50
+ORDER BY region ASC, total_sales DESC;
+```
+
+### Join + Aggregate
+
+```sql
+SELECT 
+  users.name,
+  COUNT(*) AS order_count,
+  SUM(orders.amount) AS lifetime_value,
+  AVG(orders.amount) AS avg_order
+FROM orders
+INNER JOIN users ON orders.user_id = users.id
+GROUP BY users.name
+HAVING COUNT(*) >= 2
+ORDER BY lifetime_value DESC
+LIMIT 10;
+```
+
+## Implementation Notes
+
+### Return Types
+
+| Function | Input Type | Return Type |
+|----------|------------|-------------|
+| COUNT(*) | Any | Int64 |
+| COUNT(col) | Any | Int64 |
+| SUM(col) | Numeric | Float64 |
+| AVG(col) | Numeric | Float64 |
+| MIN(col) | Numeric | Float64 |
+| MAX(col) | Numeric | Float64 |
+
+### NULL Handling
+
+- **COUNT(*)**: Counts all rows (including NULLs)
+- **COUNT(col)**: Counts non-NULL values only
+- **SUM/AVG/MIN/MAX**: Exclude NULL values from computation
+
+### Memory Usage
+
+Aggregations require:
+- Full table scan (or join result)
+- In-memory grouping (hash map of groups)
+- Accumulator per group per aggregate
+
+For large tables with many groups, this may use significant memory.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Query Reference" icon="magnifying-glass" href="/sql/queries">
+    WHERE, ORDER BY, LIMIT
+  </Card>
+  <Card title="Join Reference" icon="link" href="/sql/joins">
+    Multi-table queries
+  </Card>
+</CardGroup>
